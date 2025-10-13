@@ -1,0 +1,145 @@
+Button: Power
+Protocol: NEC
+Raw Data: 0xBA45FF00
+Address: 0x0
+Command: 0x45
+Flags: 0x0
+
+Button: Mode
+Raw Data: 0xB946FF00
+Address: 0x0
+Command: 0x46
+Flags: 0x0
+
+Button: Mute
+Protocol: NEC
+Raw Data: 0xB847FF00
+Address: 0x0
+Command: 0x47
+Flags: 0x0
+
+Button: Play/Pause
+Protocol: NEC
+Raw Data: 0xBB44FF00
+Address: 0x0
+Command: 0x44
+Flags: 0x0
+
+Button: Rewind
+Protocol: NEC
+Raw Data: 0xBF40FF00
+Address: 0x0
+Command: 0x40
+Flags: 0x0
+
+Button: Forward
+Protocol: NEC
+Raw Data: 0xBC43FF00
+Address: 0x0
+Command: 0x43
+Flags: 0x0
+
+Button: EQ
+Protocol: NEC
+Raw Data: 0xF807FF00
+Address: 0x0
+Command: 0x7
+Flags: 0x0
+
+Button: Vol-
+Protocol: NEC
+Raw Data: 0xEA15FF00
+Address: 0x0
+Command: 0x15
+Flags: 0x0
+
+Button: Vol+
+Protocol: NEC
+Raw Data: 0xF609FF00
+Address: 0x0
+Command: 0x9
+Flags: 0x0
+
+Button: RPT
+Protocol: NEC
+Raw Data: 0xE619FF00
+Address: 0x0
+Command: 0x19
+Flags: 0x0
+
+Button: U/SD
+Protocol: NEC
+Raw Data: 0xF20DFF00
+Address: 0x0
+Command: 0xD
+Flags: 0x0
+
+Button: 0
+Protocol: NEC
+Raw Data: 0xE916FF00
+Address: 0x0
+Command: 0x16
+Flags: 0x0
+
+Button: 1
+Protocol: NEC
+Raw Data: 0xF30CFF00
+Address: 0x0
+Command: 0xC
+Flags: 0x0
+
+Button: 2
+Protocol: NEC
+Raw Data: 0xE718FF00
+Address: 0x0
+Command: 0x18
+Flags: 0x0
+
+Button: 3
+Protocol: NEC
+Raw Data: 0xA15EFF00
+Address: 0x0
+Command: 0x5E
+Flags: 0x0
+
+Button: 4
+Protocol: NEC
+Raw Data: 0xF708FF00
+Address: 0x0
+Command: 0x8
+Flags: 0x0
+
+Button: 5
+Protocol: NEC
+Raw Data: 0xE31CFF00
+Address: 0x0
+Command: 0x1C
+Flags: 0x0
+
+Button: 6
+Protocol: NEC
+Raw Data: 0xA55AFF00
+Address: 0x0
+Command: 0x5A
+Flags: 0x0
+
+Button: 7
+Protocol: NEC
+Raw Data: 0xBD42FF00
+Address: 0x0
+Command: 0x42
+Flags: 0x0
+
+Button: 8
+Protocol: NEC
+Raw Data: 0xAD52FF00
+Address: 0x0
+Command: 0x52
+Flags: 0x0
+
+Button: 9
+Protocol: NEC
+Raw Data: 0xB54AFF00
+Address: 0x0
+Command: 0x4A
+Flags: 0x0
