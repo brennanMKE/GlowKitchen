@@ -9,15 +9,18 @@ static const char *TAG = "MAIN";
 /// DEVELOPMENT OVERRIDE
 // Set to a valid theme index (0-4) to force that theme, or -1 to use saved preferences
 // 0=Green, 1=Rainbow, 2=Halloween, 3=Christmas, 4=Pink Pony Club
-const int DEV_THEME_OVERRIDE = 0;  // Change this to override theme for development
+const int DEV_THEME_OVERRIDE = -1;  // Change this to override theme for development
 
 /// LED
 
-const int BRIGHTNESS = 120;
-const int MAX_BRIGHTNESS = 180;
-const int MIN_BRIGHTNESS = 50;
+const int BRIGHTNESS = 180;
+const int MAX_BRIGHTNESS = 225;
+const int MIN_BRIGHTNESS = 75;
 
-#define NUM_LEDS 10
+// Create color groups - each color spans 3 LEDs
+const int LEDS_PER_COLOR = 25;
+
+#define NUM_LEDS 240
 #define DATA_PIN 4
 
 CRGB leds[NUM_LEDS];
@@ -118,7 +121,7 @@ unsigned long logInterval = 10000;
 
 // slowBlend variables for gradient effects
 unsigned long blendTimeout = 0;
-unsigned long blendInterval = 50;  // Update blend every 50ms for smooth transitions
+unsigned long blendInterval = 100;  // Update blend every 100ms for slower, smoother transitions
 uint8_t blendOffset = 0;           // Offset for rotating the gradient
 uint8_t blendBrightness = MAX_BRIGHTNESS;     // Base brightness for blend mode
 
@@ -437,7 +440,7 @@ void flickerLEDs() {
     for (int i = 0; i < NUM_LEDS; i++) {
       if (timeouts[i] < now) {
           didChange = true;
-          unsigned long delay = random(25, 100);
+          unsigned long delay = random(500, 750);  // Slower, more candle-like flicker
           timeouts[i] = now + delay;
           uint8_t flicker = random(120, 255);
           uint8_t hue = currentHues[hueIndex];
@@ -468,24 +471,56 @@ void slowBlend() {
         const uint8_t* currentHues = getCurrentHueArray();
         int currentHueCount = getCurrentHueCount();
         
-        // Create color groups - each color spans 3 LEDs
-        const int LEDS_PER_COLOR = 3;
-        
         for (int i = 0; i < NUM_LEDS; i++) {
             // Calculate which color group this LED belongs to, with offset applied per LED
             int effectiveLedPosition = (i + blendOffset) % (NUM_LEDS * currentHueCount);
             int groupIndex = (effectiveLedPosition / LEDS_PER_COLOR) % currentHueCount;
+            int nextGroupIndex = (groupIndex + 1) % currentHueCount;
             
-            // Get the color for this group
-            uint8_t hue = currentHues[groupIndex];
+            // Get the current and next colors
+            uint8_t currentHue = currentHues[groupIndex];
+            uint8_t nextHue = currentHues[nextGroupIndex];
+            
+            // Calculate position within the color group (0 to LEDS_PER_COLOR-1)
+            int ledInGroup = effectiveLedPosition % LEDS_PER_COLOR;
+            
+            // Calculate blend fraction (0.0 at start of group, 1.0 at end of group)
+            // This creates a smooth transition across the LEDS_PER_COLOR range
+            float blendFraction = (float)ledInGroup / (float)LEDS_PER_COLOR;
+            
+            // Interpolate between current and next hue using the SHORTEST path around the hue circle
+            uint8_t blendedHue;
+            
+            // Calculate distances in both directions around the hue circle
+            int forwardDistance = (nextHue - currentHue + 256) % 256;
+            int backwardDistance = (currentHue - nextHue + 256) % 256;
+            int shortestDistance = min(forwardDistance, backwardDistance);
+            
+            // Only blend if colors are close together (within 60 hue units)
+            // This allows Pink Pony Club (55 unit span) to blend smoothly
+            // while preventing blending across larger gaps in Halloween (84 units) and Christmas (65 units)
+            const int BLEND_THRESHOLD = 60;
+            
+            if (shortestDistance <= BLEND_THRESHOLD) {
+                // Colors are close - do smooth blending
+                if (forwardDistance <= backwardDistance) {
+                    // Go forward (clockwise around hue circle)
+                    blendedHue = (currentHue + (uint8_t)(forwardDistance * blendFraction)) % 256;
+                } else {
+                    // Go backward (counter-clockwise around hue circle)
+                    blendedHue = (currentHue - (uint8_t)(backwardDistance * blendFraction) + 256) % 256;
+                }
+            } else {
+                // Colors are too far apart - don't blend, just use current color
+                // This keeps Halloween oranges separate from purples, Christmas reds separate from greens
+                blendedHue = currentHue;
+            }
             
             // Add subtle brightness variation for visual interest
-            // Use the LED position within the group for slight variation
             int baseBrightness = FastLED.getBrightness();
-            int ledInGroup = effectiveLedPosition % LEDS_PER_COLOR;
             uint8_t brightness = min(MAX_BRIGHTNESS, baseBrightness + sin8(now/15 + ledInGroup*40)/12);
             
-            leds[i] = CHSV(hue, 255, brightness);
+            leds[i] = CHSV(blendedHue, 255, brightness);
         }
         
         FastLED.show();
@@ -496,7 +531,7 @@ void slowBlend() {
             static unsigned long rotateTimeout = 0;
             if (rotateTimeout < now) {
                 blendOffset = (blendOffset + 1) % (NUM_LEDS * currentHueCount); // Move one LED at a time
-                rotateTimeout = now + 200; // Move every 200ms for smooth scrolling
+                rotateTimeout = now + 500; // Move every 500ms for slower, more relaxed scrolling
             }
         }
     }
