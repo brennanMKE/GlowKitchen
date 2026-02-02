@@ -1,0 +1,20 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#include <Arduino.h>
+
+const char* WIFI_SSID = "";
+const char* WIFI_PASS = "";
+
+const char* MQTT_HOST = "";
+const uint16_t MQTT_PORT = 1883;
+const char* MQTT_USER = "";
+const char* MQTT_PASS = "";
+
+// Device Location (change this for each board: "kitchen", "tv", or "desk")
+const char* DEVICE_LOCATION = "";
+
+// Enable or Disable IR Receiver (only 1 install has it)
+#define ENABLE_IR true
+
+#endif // CONFIG_H

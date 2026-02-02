@@ -1,8 +1,13 @@
 #include <Arduino.h>
 #include <FastLED.h>
+#include <Config.h>
+#if ENABLE_IR
 #include <IRremote.h>
+#endif
 #include <esp_log.h>
 #include <Preferences.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
 
 static const char *TAG = "MAIN";
 
@@ -17,14 +22,15 @@ const int BRIGHTNESS = 180;
 const int MAX_BRIGHTNESS = 225;
 const int MIN_BRIGHTNESS = 75;
 
-// Create color groups - each color spans 3 LEDs
-const int LEDS_PER_COLOR = 25;
+// LED Configuration - Default values, will be loaded from Preferences
+#define MAX_LEDS 500
+int numLeds = 240;
+int ledsPerColor = 25;
 
-#define NUM_LEDS 240
 #define DATA_PIN 4
 
-CRGB leds[NUM_LEDS];
-unsigned long timeouts[NUM_LEDS];
+CRGB leds[MAX_LEDS];
+unsigned long timeouts[MAX_LEDS];
 
 // Theme System
 enum HueTheme {
@@ -126,6 +132,7 @@ uint8_t blendOffset = 0;           // Offset for rotating the gradient
 uint8_t blendBrightness = MAX_BRIGHTNESS;     // Base brightness for blend mode
 
 // NEC Remote Button Constants (Protocol: NEC, Address: 0x0)
+#if ENABLE_IR
 enum GrayRemoteButton {
     NEC_VOL_PLUS = 0x09,         // Vol+ - Increase Brightness
     NEC_VOL_MINUS = 0x15,        // Vol- - Decrease Brightness
@@ -155,22 +162,44 @@ enum GrayRemoteButton {
 unsigned long lastButtonTime = 0;
 unsigned long buttonDebounceDelay = 100;  // 100ms debounce delay
 GrayRemoteButton lastButton = NEC_UNKNOWN;
+#endif
 
 // Preferences for persistent storage
 Preferences preferences;
 
 /// IR
-
+#if ENABLE_IR
 const int irReceiverPin = 3;
 unsigned long irLogTimeout = 0;
 unsigned long irLogInterval = 10000;
 const bool IR_DEBUG_MODE = true;  // Set to false to reduce logging
+#endif
+
+/// MQTT & WiFi
+
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
+
+// Non-blocking reconnect timing
+static const uint32_t MQTT_RETRY_MS = 5000;
+uint32_t mqttRetryAt = 0;
 
 // Theme switching - now simplified to direct button control
 
 const uint8_t NEC_REMOTE_ADDRESS = 0x0;
 
 // Theme Helper Functions
+const char* getThemeMqttCommand(HueTheme theme) {
+    switch (theme) {
+        case THEME_GREEN: return "GREEN";
+        case THEME_RAINBOW: return "RAINBOW";
+        case THEME_PINK_PONY: return "PINK_PONY";
+        case THEME_HALLOWEEN: return "HALLOWEEN";
+        case THEME_CHRISTMAS: return "CHRISTMAS";
+        default: return "GREEN";
+    }
+}
+
 const uint8_t* getCurrentHueArray() {
     switch (currentTheme) {
         case THEME_GREEN: return GREEN_HUES;
@@ -194,7 +223,7 @@ int getCurrentHueCount() {
 }
 
 void saveThemeToPreferences() {
-    preferences.begin("led_cabinet", false);
+    preferences.begin("glow_kitchen", false);
     preferences.putUChar("theme", (unsigned char)currentTheme);
     preferences.end();
     ESP_LOGI(TAG, "Theme saved: %s", THEME_NAMES[currentTheme]);
@@ -202,22 +231,39 @@ void saveThemeToPreferences() {
 
 void saveBrightnessToPreferences() {
     int currentBrightness = FastLED.getBrightness();
-    preferences.begin("led_cabinet", false);
+    preferences.begin("glow_kitchen", false);
     preferences.putUChar("brightness", (unsigned char)currentBrightness);
     preferences.end();
     ESP_LOGI(TAG, "Brightness saved: %d", currentBrightness);
 }
 
 void saveHueToPreferences() {
-    preferences.begin("led_cabinet", false);
+    preferences.begin("glow_kitchen", false);
     preferences.putUChar("hue_index", (unsigned char)hueIndex);
     preferences.end();
     ESP_LOGI(TAG, "Hue index saved: %d", hueIndex);
 }
 
+void saveLedConfigToPreferences() {
+    preferences.begin("glow_kitchen", false);
+    preferences.putInt("num_leds", numLeds);
+    preferences.putInt("leds_per_color", ledsPerColor);
+    preferences.end();
+    ESP_LOGI(TAG, "LED Config saved: num_leds=%d, leds_per_color=%d", numLeds, ledsPerColor);
+}
+
 void loadAllPreferences() {
-    preferences.begin("led_cabinet", true);
+    preferences.begin("glow_kitchen", true);
     
+    // Load LED count and color group size
+    numLeds = preferences.getInt("num_leds", 240);
+    ledsPerColor = preferences.getInt("leds_per_color", 25);
+    
+    // Safety check
+    if (numLeds > MAX_LEDS) numLeds = MAX_LEDS;
+    if (numLeds < 1) numLeds = 1;
+    if (ledsPerColor < 1) ledsPerColor = 1;
+
     // Check for development theme override first
     if (DEV_THEME_OVERRIDE >= 0 && DEV_THEME_OVERRIDE < THEME_COUNT) {
         currentTheme = (HueTheme)DEV_THEME_OVERRIDE;
@@ -271,7 +317,7 @@ void switchToNextTheme() {
     // Force immediate visual update
     const uint8_t* currentHues = getCurrentHueArray();
     uint8_t newHue = currentHues[hueIndex];
-    fill_solid(leds, NUM_LEDS, CHSV(newHue, 255, 200));
+    fill_solid(leds, numLeds, CHSV(newHue, 255, 200));
     FastLED.show();
 }
 
@@ -285,7 +331,7 @@ void switchToPreviousTheme() {
     // Force immediate visual update
     const uint8_t* currentHues = getCurrentHueArray();
     uint8_t newHue = currentHues[hueIndex];
-    fill_solid(leds, NUM_LEDS, CHSV(newHue, 255, 200));
+    fill_solid(leds, numLeds, CHSV(newHue, 255, 200));
     FastLED.show();
 }
 
@@ -321,10 +367,10 @@ void toggleAllLEDs() {
     if (!ledsEnabled) {
         // Turn off all LEDs - be aggressive about it
         ESP_LOGI(TAG, "Turning OFF all LEDs - setting to black");
-        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        fill_solid(leds, numLeds, CRGB::Black);
         FastLED.show();
         delay(10); // Small delay to ensure the command is processed
-        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        fill_solid(leds, numLeds, CRGB::Black);
         FastLED.show();
         ESP_LOGI(TAG, "All LEDs turned OFF");
     } else {
@@ -332,13 +378,36 @@ void toggleAllLEDs() {
         ESP_LOGI(TAG, "Turning ON all LEDs");
         const uint8_t* currentHues = getCurrentHueArray();
         uint8_t hue = currentHues[hueIndex];
-        fill_solid(leds, NUM_LEDS, CHSV(hue, 255, 200));
+        fill_solid(leds, numLeds, CHSV(hue, 255, 200));
         FastLED.show();
         ESP_LOGI(TAG, "All LEDs turned ON (Theme: %s)", THEME_NAMES[currentTheme]);
     }
 }
 
+// MQTT Helpers
+void publishState() {
+    if (!mqtt.connected()) return;
+
+    String topic = "lights/" + String(DEVICE_LOCATION) + "/state";
+    String payload = "{\"theme\":\"" + String(THEME_NAMES[currentTheme]) + "\",";
+    payload += "\"numLeds\":" + String(numLeds) + ",";
+    payload += "\"ledsPerColor\":" + String(ledsPerColor) + ",";
+    payload += "\"brightness\":" + String(FastLED.getBrightness()) + ",";
+    payload += "\"ledsEnabled\":" + String(ledsEnabled ? "true" : "false") + "}";
+
+    mqtt.publish(topic.c_str(), payload.c_str(), true);
+    ESP_LOGI(TAG, "Published state to %s", topic.c_str());
+}
+
+void broadcastCommand(const char* cmd) {
+    if (mqtt.connected()) {
+        mqtt.publish("lights/all/cmd", cmd);
+        ESP_LOGI(TAG, "Broadcasted command to all: %s", cmd);
+    }
+}
+
 // Button debouncing function
+#if ENABLE_IR
 bool isButtonDebounced(GrayRemoteButton button) {
     unsigned long now = millis();
     
@@ -369,34 +438,216 @@ void handleGrayRemoteButton(GrayRemoteButton button) {
     switch (button) {
         case NEC_VOL_PLUS:
             increaseBrightness();
+            {
+                String cmd = "SET_BRIGHTNESS:" + String(FastLED.getBrightness());
+                broadcastCommand(cmd.c_str());
+            }
             break;
         case NEC_VOL_MINUS:
             decreaseBrightness();
+            {
+                String cmd = "SET_BRIGHTNESS:" + String(FastLED.getBrightness());
+                broadcastCommand(cmd.c_str());
+            }
             break;
         case NEC_REWIND:
             // Rewind = Previous Theme
             switchToPreviousTheme();
+            broadcastCommand(getThemeMqttCommand(currentTheme));
             break;
         case NEC_FORWARD:
             // Forward = Next Theme
             switchToNextTheme();
+            broadcastCommand(getThemeMqttCommand(currentTheme));
             break;
         case NEC_PLAY_PAUSE:
         case NEC_POWER:
             // Both Play/Pause and Power toggle LEDs
             toggleAllLEDs();
+            broadcastCommand(ledsEnabled ? "ON" : "OFF");
             break;
         case NEC_MODE:
             // Mode = Toggle auto color change
             toggleColorChange();
+            broadcastCommand(colorChangeEnabled ? "COLOR_CHANGE_ON" : "COLOR_CHANGE_OFF");
             break;
         default:
             ESP_LOGI(TAG, "Unknown or unmapped button pressed (Command: 0x%X)", button);
             break;
     }
 }
+#endif
+
+void onMqttMessage(char* topic, byte* payload, unsigned int len) {
+    String msg;
+    msg.reserve(len);
+    for (unsigned int i = 0; i < len; i++) msg += (char)payload[i];
+    msg.trim(); // Remove any hidden whitespace/newlines
+
+    ESP_LOGI(TAG, "MQTT Topic: %s, Payload: '%s'", topic, msg.c_str());
+
+    if (msg == "NEXT_THEME") {
+        switchToNextTheme();
+        publishState();
+    } else if (msg == "PREV_THEME") {
+        switchToPreviousTheme();
+        publishState();
+    } else if (msg == "STATUS") {
+        publishState();
+    } else if (msg.startsWith("SET_NUM_LEDS:")) {
+        int val = msg.substring(13).toInt();
+        if (val > 0 && val <= MAX_LEDS) {
+            numLeds = val;
+            saveLedConfigToPreferences();
+            fill_solid(leds, MAX_LEDS, CRGB::Black);
+            FastLED.show();
+            publishState();
+        }
+    } else if (msg.startsWith("SET_LEDS_PER_COLOR:")) {
+        int val = msg.substring(19).toInt();
+        if (val > 0) {
+            ledsPerColor = val;
+            saveLedConfigToPreferences();
+            publishState();
+        }
+    } else if (msg.startsWith("SET_BRIGHTNESS:")) {
+        int val = msg.substring(15).toInt();
+        if (val >= 0 && val <= 255) {
+            if (FastLED.getBrightness() != val) {
+                FastLED.setBrightness(val);
+                FastLED.show();
+                saveBrightnessToPreferences();
+                publishState();
+            }
+        }
+    } else {
+        HueTheme newTheme = currentTheme;
+        bool themeIdentified = false;
+
+        if (msg == "GREEN" || msg == "THEME_GREEN" || msg == "SCENE_1") {
+            newTheme = THEME_GREEN;
+            themeIdentified = true;
+        } else if (msg == "RAINBOW" || msg == "THEME_RAINBOW" || msg == "SCENE_2") {
+            newTheme = THEME_RAINBOW;
+            themeIdentified = true;
+        } else if (msg == "PINK_PONY" || msg == "THEME_PINK_PONY") {
+            newTheme = THEME_PINK_PONY;
+            themeIdentified = true;
+        } else if (msg == "HALLOWEEN" || msg == "THEME_HALLOWEEN") {
+            newTheme = THEME_HALLOWEEN;
+            themeIdentified = true;
+        } else if (msg == "CHRISTMAS" || msg == "THEME_CHRISTMAS") {
+            newTheme = THEME_CHRISTMAS;
+            themeIdentified = true;
+        }
+
+        if (themeIdentified) {
+            if (newTheme != currentTheme || !ledsEnabled) {
+                currentTheme = newTheme;
+                hueIndex = 0;
+                saveThemeToPreferences();
+                if (!ledsEnabled) ledsEnabled = true; // Use direct flag to avoid toggle logic
+                
+                // Force immediate visual update
+                const uint8_t* currentHues = getCurrentHueArray();
+                uint8_t newHue = currentHues[hueIndex];
+                fill_solid(leds, numLeds, CHSV(newHue, 255, 200));
+                FastLED.show();
+                publishState();
+            }
+            return;
+        }
+
+        if (msg == "TOGGLE") {
+            toggleAllLEDs();
+            publishState();
+        } else if (msg == "ON") {
+            if (!ledsEnabled) {
+                toggleAllLEDs();
+                publishState();
+            }
+        } else if (msg == "OFF") {
+            if (ledsEnabled) {
+                toggleAllLEDs();
+                publishState();
+            }
+        } else if (msg == "BRIGHT_UP") {
+            increaseBrightness();
+            publishState();
+        } else if (msg == "BRIGHT_DOWN") {
+            decreaseBrightness();
+            publishState();
+        } else if (msg == "COLOR_CHANGE_ON") {
+            if (!colorChangeEnabled) {
+                colorChangeEnabled = true;
+                publishState();
+            }
+        } else if (msg == "COLOR_CHANGE_OFF") {
+            if (colorChangeEnabled) {
+                colorChangeEnabled = false;
+                publishState();
+            }
+        }
+    }
+}
+
+void ensureWifi() {
+    if (WiFi.status() == WL_CONNECTED) return;
+
+    ESP_LOGI(TAG, "WiFi connecting to %s...", WIFI_SSID);
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    // Quick connect attempt (non-blocking in loop, but here we wait a bit in setup or first run)
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 5000) {
+        delay(100);
+        Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+        ESP_LOGI(TAG, "WiFi connected, IP: %s", WiFi.localIP().toString().c_str());
+    } else {
+        ESP_LOGW(TAG, "WiFi connection failed");
+    }
+}
+
+void ensureMqtt() {
+    if (mqtt.connected()) {
+        mqtt.loop();
+        return;
+    }
+
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    uint32_t now = millis();
+    if (now < mqttRetryAt) return;
+    mqttRetryAt = now + MQTT_RETRY_MS;
+
+    mqtt.setServer(MQTT_HOST, MQTT_PORT);
+    mqtt.setCallback(onMqttMessage);
+
+    String clientId = "esp32c3-glowkitchen-" + String(DEVICE_LOCATION) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+
+    ESP_LOGI(TAG, "MQTT connecting to %s...", MQTT_HOST);
+    if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
+        ESP_LOGI(TAG, "MQTT connected; subscribing...");
+        mqtt.subscribe("lights/all/cmd");
+        
+        String locationTopic = "lights/" + String(DEVICE_LOCATION) + "/cmd";
+        mqtt.subscribe(locationTopic.c_str());
+        ESP_LOGI(TAG, "Subscribed to %s", locationTopic.c_str());
+
+        // Report initial state
+        publishState();
+    } else {
+        ESP_LOGW(TAG, "MQTT connect failed, rc=%d", mqtt.state());
+    }
+}
 
 // Function to identify button from IR data
+#if ENABLE_IR
 GrayRemoteButton identifyGrayRemoteButton(uint8_t address, uint8_t command) {
     if (address != NEC_REMOTE_ADDRESS) {
         return NEC_UNKNOWN;
@@ -427,6 +678,7 @@ GrayRemoteButton identifyGrayRemoteButton(uint8_t address, uint8_t command) {
         default: return NEC_UNKNOWN;
     }
 }
+#endif
 
 void flickerLEDs() {
     bool didChange = false;
@@ -437,7 +689,7 @@ void flickerLEDs() {
     unsigned long now = millis();
     
     // Update individual LED flickering
-    for (int i = 0; i < NUM_LEDS; i++) {
+    for (int i = 0; i < numLeds; i++) {
       if (timeouts[i] < now) {
           didChange = true;
           unsigned long delay = random(500, 750);  // Slower, more candle-like flicker
@@ -471,22 +723,22 @@ void slowBlend() {
         const uint8_t* currentHues = getCurrentHueArray();
         int currentHueCount = getCurrentHueCount();
         
-        for (int i = 0; i < NUM_LEDS; i++) {
+        for (int i = 0; i < numLeds; i++) {
             // Calculate which color group this LED belongs to, with offset applied per LED
-            int effectiveLedPosition = (i + blendOffset) % (NUM_LEDS * currentHueCount);
-            int groupIndex = (effectiveLedPosition / LEDS_PER_COLOR) % currentHueCount;
+            int effectiveLedPosition = (i + blendOffset) % (numLeds * currentHueCount);
+            int groupIndex = (effectiveLedPosition / ledsPerColor) % currentHueCount;
             int nextGroupIndex = (groupIndex + 1) % currentHueCount;
             
             // Get the current and next colors
             uint8_t currentHue = currentHues[groupIndex];
             uint8_t nextHue = currentHues[nextGroupIndex];
             
-            // Calculate position within the color group (0 to LEDS_PER_COLOR-1)
-            int ledInGroup = effectiveLedPosition % LEDS_PER_COLOR;
+            // Calculate position within the color group (0 to ledsPerColor-1)
+            int ledInGroup = effectiveLedPosition % ledsPerColor;
             
             // Calculate blend fraction (0.0 at start of group, 1.0 at end of group)
-            // This creates a smooth transition across the LEDS_PER_COLOR range
-            float blendFraction = (float)ledInGroup / (float)LEDS_PER_COLOR;
+            // This creates a smooth transition across the ledsPerColor range
+            float blendFraction = (float)ledInGroup / (float)ledsPerColor;
             
             // Interpolate between current and next hue using the SHORTEST path around the hue circle
             uint8_t blendedHue;
@@ -530,7 +782,7 @@ void slowBlend() {
         if (colorChangeEnabled) {
             static unsigned long rotateTimeout = 0;
             if (rotateTimeout < now) {
-                blendOffset = (blendOffset + 1) % (NUM_LEDS * currentHueCount); // Move one LED at a time
+                blendOffset = (blendOffset + 1) % (numLeds * currentHueCount); // Move one LED at a time
                 rotateTimeout = now + 500; // Move every 500ms for slower, more relaxed scrolling
             }
         }
@@ -538,22 +790,24 @@ void slowBlend() {
 }
 
 void setupLED() {
-    FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
+    // Load all saved preferences (theme, brightness, hue, led config)
+    loadAllPreferences();
+
+    // Initialize with MAX_LEDS so we can change numLeds at runtime without re-initializing
+    FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, MAX_LEDS);
     FastLED.setMaxPowerInVoltsAndMilliamps(5, 500); // volts, mA
     
-    // Load all saved preferences (theme, brightness, hue)
-    loadAllPreferences();
-    
-    ESP_LOGI(TAG, "LED setup complete");
+    ESP_LOGI(TAG, "LED setup complete with %d LEDs (max %d)", numLeds, MAX_LEDS);
 
     unsigned long now = millis();
-    for (int i = 0; i < NUM_LEDS; i++) {
+    for (int i = 0; i < MAX_LEDS; i++) {
       timeouts[i] = now;
     }
     hueTimeout = now + 2000;
     logTimeout = now + logInterval;
 }
 
+#if ENABLE_IR
 void setupIR() {    
     // Initialize IR receiver
     IrReceiver.begin(irReceiverPin, DISABLE_LED_FEEDBACK);
@@ -561,6 +815,7 @@ void setupIR() {
     ESP_LOGI(TAG, "IR receiver initialized on pin %d", irReceiverPin);
     ESP_LOGI(TAG, "IR receiver ready: %s", IrReceiver.isIdle() ? "true" : "false");
 }
+#endif
 
 void loopLED() {    
     unsigned long now = millis();
@@ -576,7 +831,7 @@ void loopLED() {
         // Force all LEDs to black and show immediately
         static unsigned long lastBlackUpdate = 0;
         if (now - lastBlackUpdate > 100) { // Update every 100ms to ensure they stay black
-            fill_solid(leds, NUM_LEDS, CRGB::Black);
+            fill_solid(leds, numLeds, CRGB::Black);
             FastLED.show();
             lastBlackUpdate = now;
         }
@@ -591,6 +846,7 @@ void loopLED() {
     }
 }
 
+#if ENABLE_IR
 void loopIR() {
     unsigned long now = millis();
 
@@ -677,15 +933,25 @@ void loopIR() {
         irLogTimeout = now + irLogInterval;
     }
 }
+#endif
 
 void setup() {
     Serial.begin(115200);
 
     setupLED();
+#if ENABLE_IR
     setupIR();
+#endif
+    
+    ensureWifi();
 }
 
 void loop() {
+    ensureWifi();
+    ensureMqtt();
+    
     loopLED();
+#if ENABLE_IR
     loopIR();
+#endif
 }
