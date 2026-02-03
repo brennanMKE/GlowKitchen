@@ -6,7 +6,7 @@ TOPIC="lights/all/cmd"
 STATE_FILE="$HOME/.glow_kitchen_theme"
 
 # Define available themes in order
-THEMES=("GREEN" "RAINBOW" "PINK_PONY" "HALLOWEEN" "CHRISTMAS")
+THEMES=("GREEN" "RAINBOW" "PINK_PONY" "OCEAN_WAVES" "SUNSET" "FOREST")
 THEME_COUNT=${#THEMES[@]}
 
 # Read current theme from state file, default to first theme

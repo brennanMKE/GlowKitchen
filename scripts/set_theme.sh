@@ -8,7 +8,7 @@ STATE_FILE="$HOME/.glow_kitchen_theme"
 if [ "$#" -lt 2 ]; then
     echo "Usage: $0 [location] [THEME]"
     echo "Locations: kitchen, tv, desk, all"
-    echo "Themes: GREEN, RAINBOW, PINK_PONY, HALLOWEEN, CHRISTMAS"
+    echo "Themes: GREEN, RAINBOW, PINK_PONY, OCEAN_WAVES, SUNSET, FOREST"
     echo "Example: $0 all PINK_PONY"
     exit 1
 fi
@@ -20,7 +20,7 @@ THEME=$2
 THEME=$(echo "$THEME" | tr '[:lower:]' '[:upper:]')
 
 # Validation
-VALID_THEMES=("GREEN" "RAINBOW" "PINK_PONY" "HALLOWEEN" "CHRISTMAS")
+VALID_THEMES=("GREEN" "RAINBOW" "PINK_PONY" "OCEAN_WAVES" "SUNSET" "FOREST")
 IS_VALID=false
 for t in "${VALID_THEMES[@]}"; do
     if [ "$THEME" == "$t" ]; then

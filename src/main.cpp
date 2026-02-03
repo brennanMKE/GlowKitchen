@@ -12,8 +12,8 @@
 static const char *TAG = "MAIN";
 
 /// DEVELOPMENT OVERRIDE
-// Set to a valid theme index (0-4) to force that theme, or -1 to use saved preferences
-// 0=Green, 1=Rainbow, 2=Halloween, 3=Christmas, 4=Pink Pony Club
+// Set to a valid theme index (0-5) to force that theme, or -1 to use saved preferences
+// 0=Green, 1=Rainbow, 2=Pink Pony Club, 3=Ocean Waves, 4=Sunset, 5=Forest
 const int DEV_THEME_OVERRIDE = -1;  // Change this to override theme for development
 
 /// LED
@@ -37,17 +37,19 @@ enum HueTheme {
     THEME_GREEN = 0,
     THEME_RAINBOW = 1,
     THEME_PINK_PONY = 2,
-    THEME_HALLOWEEN = 3,
-    THEME_CHRISTMAS = 4,
-    THEME_COUNT = 5
+    THEME_OCEAN = 3,
+    THEME_SUNSET = 4,
+    THEME_FOREST = 5,
+    THEME_COUNT = 6
 };
 
 const char* THEME_NAMES[] = {
     "Green",
     "Rainbow", 
     "Pink Pony Club",
-    "Halloween",
-    "Christmas"
+    "Ocean Waves",
+    "Sunset",
+    "Forest"
 };
 
 // Green Theme - Original candle-like greens
@@ -99,22 +101,25 @@ const uint8_t HALLOWEEN_HUES[] = {
 };
 
 // Christmas Theme - Red and green shades only
-const uint8_t CHRISTMAS_HUES[] = {
-  0,   // pure red
-  3,   // red-red
-  8,   // red-orange (still red)
-  15,  // darker red-orange
-  80,  // dark green
-  85,  // medium-dark green
-  90,  // medium green
-  96   // light green (max before blue shift)
-};
+ const uint8_t CHRISTMAS_HUES[] = {
+   0,   // pure red
+   3,   // red-red
+   8,   // red-orange (still red)
+   15,  // darker red-orange
+   80,  // dark green
+   85,  // medium-dark green
+   90,  // medium green
+   96   // light green (max before blue shift)
+ };
 
-const int NUM_GREEN_HUES = sizeof(GREEN_HUES) / sizeof(GREEN_HUES[0]);
-const int NUM_RAINBOW_HUES = sizeof(RAINBOW_HUES) / sizeof(RAINBOW_HUES[0]);
-const int NUM_HALLOWEEN_HUES = sizeof(HALLOWEEN_HUES) / sizeof(HALLOWEEN_HUES[0]);
-const int NUM_CHRISTMAS_HUES = sizeof(CHRISTMAS_HUES) / sizeof(CHRISTMAS_HUES[0]);
-const int NUM_PINK_PONY_HUES = sizeof(PINK_PONY_HUES) / sizeof(PINK_PONY_HUES[0]);
+ const int NUM_GREEN_HUES = sizeof(GREEN_HUES) / sizeof(GREEN_HUES[0]);
+ const int NUM_RAINBOW_HUES = sizeof(RAINBOW_HUES) / sizeof(RAINBOW_HUES[0]);
+ const int NUM_HALLOWEEN_HUES = sizeof(HALLOWEEN_HUES) / sizeof(HALLOWEEN_HUES[0]);
+ const int NUM_CHRISTMAS_HUES = sizeof(CHRISTMAS_HUES) / sizeof(CHRISTMAS_HUES[0]);
+ const int NUM_PINK_PONY_HUES = sizeof(PINK_PONY_HUES) / sizeof(PINK_PONY_HUES[0]);
+ const int NUM_OCEAN_HUES = sizeof(OCEAN_HUES) / sizeof(OCEAN_HUES[0]);
+ const int NUM_SUNSET_HUES = sizeof(SUNSET_HUES) / sizeof(SUNSET_HUES[0]);
+ const int NUM_FOREST_HUES = sizeof(FOREST_HUES) / sizeof(FOREST_HUES[0]);
 
 // Theme management
 HueTheme currentTheme = THEME_GREEN;
@@ -194,8 +199,9 @@ const char* getThemeMqttCommand(HueTheme theme) {
         case THEME_GREEN: return "GREEN";
         case THEME_RAINBOW: return "RAINBOW";
         case THEME_PINK_PONY: return "PINK_PONY";
-        case THEME_HALLOWEEN: return "HALLOWEEN";
-        case THEME_CHRISTMAS: return "CHRISTMAS";
+        case THEME_OCEAN: return "OCEAN_WAVES";
+        case THEME_SUNSET: return "SUNSET";
+        case THEME_FOREST: return "FOREST";
         default: return "GREEN";
     }
 }
@@ -204,9 +210,10 @@ const uint8_t* getCurrentHueArray() {
     switch (currentTheme) {
         case THEME_GREEN: return GREEN_HUES;
         case THEME_RAINBOW: return RAINBOW_HUES;
-        case THEME_HALLOWEEN: return HALLOWEEN_HUES;
-        case THEME_CHRISTMAS: return CHRISTMAS_HUES;
         case THEME_PINK_PONY: return PINK_PONY_HUES;
+        case THEME_OCEAN: return OCEAN_HUES;
+        case THEME_SUNSET: return SUNSET_HUES;
+        case THEME_FOREST: return FOREST_HUES;
         default: return GREEN_HUES;
     }
 }
@@ -215,9 +222,10 @@ int getCurrentHueCount() {
     switch (currentTheme) {
         case THEME_GREEN: return NUM_GREEN_HUES;
         case THEME_RAINBOW: return NUM_RAINBOW_HUES;
-        case THEME_HALLOWEEN: return NUM_HALLOWEEN_HUES;
-        case THEME_CHRISTMAS: return NUM_CHRISTMAS_HUES;
         case THEME_PINK_PONY: return NUM_PINK_PONY_HUES;
+        case THEME_OCEAN: return NUM_OCEAN_HUES;
+        case THEME_SUNSET: return NUM_SUNSET_HUES;
+        case THEME_FOREST: return NUM_FOREST_HUES;
         default: return NUM_GREEN_HUES;
     }
 }
@@ -533,11 +541,14 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         } else if (msg == "PINK_PONY" || msg == "THEME_PINK_PONY") {
             newTheme = THEME_PINK_PONY;
             themeIdentified = true;
-        } else if (msg == "HALLOWEEN" || msg == "THEME_HALLOWEEN") {
-            newTheme = THEME_HALLOWEEN;
+        } else if (msg == "OCEAN_WAVES" || msg == "THEME_OCEAN") {
+            newTheme = THEME_OCEAN;
             themeIdentified = true;
-        } else if (msg == "CHRISTMAS" || msg == "THEME_CHRISTMAS") {
-            newTheme = THEME_CHRISTMAS;
+        } else if (msg == "SUNSET" || msg == "THEME_SUNSET") {
+            newTheme = THEME_SUNSET;
+            themeIdentified = true;
+        } else if (msg == "FOREST" || msg == "THEME_FOREST") {
+            newTheme = THEME_FOREST;
             themeIdentified = true;
         }
 
