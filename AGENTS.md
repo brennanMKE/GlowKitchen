@@ -23,6 +23,24 @@ Since this is an ESP32 Arduino project, unit tests may not be configured in the 
 2. For development, use the platformio.ini configuration to target specific environments
 3. Debug with `pio run --verbose` to see compilation details
 
+## Device Name and ID Support
+
+The GlowKitchen project now supports both device IDs and names for MQTT communication:
+
+1. **Device ID Generation** - Device IDs are automatically generated from the ESP32's MAC address using `deviceIdFromMacCompact()` 
+   - Format: "7cdfa1123456" (hexadecimal string without colons)
+   - This ensures each device has a unique identifier for MQTT topics
+
+2. **Device Name Support** - Device names can be set via MQTT commands:
+   ```
+   lights/[device_id]/cmd
+   SET_DEVICE_NAME:kitchen
+   ```
+
+3. **MQTT Topic Handling** - The system now properly handles both device IDs and names in MQTT topics by using the `getDeviceName()` function which falls back to device ID when no name is set.
+
+This allows users to control devices using either their unique device ID or a more memorable device name in MQTT commands.
+
 ## Code Style Guidelines
 
 ### General Structure
@@ -110,3 +128,29 @@ All themes integrate with MQTT commands using the following format:
 - GREEN, RAINBOW, PINK_PONY, OCEAN_WAVES, SUNSET, FOREST
 
 MQTT commands for theme switching now support all 6 themes including the new Ocean Waves, Sunset, and Forest themes.
+
+## Device Configuration
+
+The GlowKitchen project now uses unique device IDs generated from the ESP32's MAC address for identification:
+
+### Device ID Generation
+- Device IDs are automatically generated from the ESP32's MAC address using `deviceIdFromMacCompact()`
+- Format: "7cdfa1123456" (hexadecimal string without colons)
+- This ensures each device has a unique identifier for MQTT topics
+
+### Configurable Settings via MQTT
+The following settings can be configured via MQTT messages:
+
+1. **Device Name** - Can be set using:
+   ```
+   lights/[device_id]/cmd
+   SET_DEVICE_NAME:kitchen
+   ```
+
+2. **IR Flag** - Can be set using:
+   ```
+   lights/[device_id]/cmd
+   SET_IR_FLAG:true
+   ```
+
+These settings override default values and allow runtime configuration of device behavior.

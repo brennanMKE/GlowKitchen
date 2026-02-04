@@ -1,9 +1,7 @@
 #include <Arduino.h>
 #include <FastLED.h>
 #include <Config.h>
-#if ENABLE_IR
 #include <IRremote.h>
-#endif
 #include <esp_log.h>
 #include <Preferences.h>
 #include <WiFi.h>
@@ -37,7 +35,7 @@ enum HueTheme {
     THEME_GREEN = 0,
     THEME_RAINBOW = 1,
     THEME_PINK_PONY = 2,
-    THEME_OCEAN = 3,
+    THEME_OCEAN_WAVES = 3,
     THEME_SUNSET = 4,
     THEME_FOREST = 5,
     THEME_COUNT = 6
@@ -88,38 +86,66 @@ const uint8_t PINK_PONY_HUES[] = {
   255  // soft pink
 };
 
-// Halloween Theme - Orange and purple
-const uint8_t HALLOWEEN_HUES[] = {
-  16,  // deep orange
-  20,  // orange
-  24,  // bright orange
-  28,  // yellow-orange
-  200, // deep purple
-  208, // purple
-  216, // bright purple
-  224  // magenta-purple
-};
-
-// Christmas Theme - Red and green shades only
- const uint8_t CHRISTMAS_HUES[] = {
-   0,   // pure red
-   3,   // red-red
-   8,   // red-orange (still red)
-   15,  // darker red-orange
-   80,  // dark green
-   85,  // medium-dark green
-   90,  // medium green
-   96   // light green (max before blue shift)
+// Ocean Waves Theme - Deep blues and teal
+ const uint8_t OCEAN_HUES[] = {
+   190, // deep navy
+   185, // dark teal
+   180, // medium teal
+   175, // light teal
+   170, // very light blue
+   165, // pale blue
+   160, // sky blue
+   155  // light blue
  };
 
- const int NUM_GREEN_HUES = sizeof(GREEN_HUES) / sizeof(GREEN_HUES[0]);
- const int NUM_RAINBOW_HUES = sizeof(RAINBOW_HUES) / sizeof(RAINBOW_HUES[0]);
- const int NUM_HALLOWEEN_HUES = sizeof(HALLOWEEN_HUES) / sizeof(HALLOWEEN_HUES[0]);
- const int NUM_CHRISTMAS_HUES = sizeof(CHRISTMAS_HUES) / sizeof(CHRISTMAS_HUES[0]);
- const int NUM_PINK_PONY_HUES = sizeof(PINK_PONY_HUES) / sizeof(PINK_PONY_HUES[0]);
- const int NUM_OCEAN_HUES = sizeof(OCEAN_HUES) / sizeof(OCEAN_HUES[0]);
- const int NUM_SUNSET_HUES = sizeof(SUNSET_HUES) / sizeof(SUNSET_HUES[0]);
- const int NUM_FOREST_HUES = sizeof(FOREST_HUES) / sizeof(FOREST_HUES[0]);
+// Sunset Theme - Warm oranges and pinks
+ const uint8_t SUNSET_HUES[] = {
+   0,   // deep red
+   5,   // dark red-orange
+   10,  // red-orange
+   15,  // orange-red
+   20,  // bright orange
+   25,  // orange-yellow
+   30,  // yellow-orange
+   35,  // bright yellow
+   40,  // warm yellow
+   45,  // soft orange-yellow
+   50,  // warm pink-orange
+   55,  // soft pink
+   60,  // light pink
+   65,  // pale pink
+   70,  // soft purple-pink
+   75,  // deep purple
+   80,  // very dark purple
+   85   // deep indigo
+ };
+
+// Forest Theme - Natural greens and earth tones
+ const uint8_t FOREST_HUES[] = {
+   70,  // deep forest green
+   75,  // dark forest green
+   80,  // medium forest green
+   85,  // light forest green
+   90,  // moss green
+   95,  // olive green
+   100, // forest blue-green
+   105, // earth brown-green
+   110, // dark moss green
+   115, // forest olive
+   120, // deep woodland green
+   125, // forest twilight green
+   130, // dark forest night green
+   135, // verdant forest green
+   140, // deep forest emerald
+   145  // rich forest jungle green
+ };
+
+const int NUM_GREEN_HUES = sizeof(GREEN_HUES) / sizeof(GREEN_HUES[0]);
+const int NUM_RAINBOW_HUES = sizeof(RAINBOW_HUES) / sizeof(RAINBOW_HUES[0]);
+const int NUM_PINK_PONY_HUES = sizeof(PINK_PONY_HUES) / sizeof(PINK_PONY_HUES[0]);
+const int NUM_OCEAN_HUES = sizeof(OCEAN_HUES) / sizeof(OCEAN_HUES[0]);
+const int NUM_SUNSET_HUES = sizeof(SUNSET_HUES) / sizeof(SUNSET_HUES[0]);
+const int NUM_FOREST_HUES = sizeof(FOREST_HUES) / sizeof(FOREST_HUES[0]);
 
 // Theme management
 HueTheme currentTheme = THEME_GREEN;
@@ -137,7 +163,6 @@ uint8_t blendOffset = 0;           // Offset for rotating the gradient
 uint8_t blendBrightness = MAX_BRIGHTNESS;     // Base brightness for blend mode
 
 // NEC Remote Button Constants (Protocol: NEC, Address: 0x0)
-#if ENABLE_IR
 enum GrayRemoteButton {
     NEC_VOL_PLUS = 0x09,         // Vol+ - Increase Brightness
     NEC_VOL_MINUS = 0x15,        // Vol- - Decrease Brightness
@@ -167,18 +192,15 @@ enum GrayRemoteButton {
 unsigned long lastButtonTime = 0;
 unsigned long buttonDebounceDelay = 100;  // 100ms debounce delay
 GrayRemoteButton lastButton = NEC_UNKNOWN;
-#endif
 
 // Preferences for persistent storage
 Preferences preferences;
 
 /// IR
-#if ENABLE_IR
 const int irReceiverPin = 3;
 unsigned long irLogTimeout = 0;
 unsigned long irLogInterval = 10000;
 const bool IR_DEBUG_MODE = true;  // Set to false to reduce logging
-#endif
 
 /// MQTT & WiFi
 
@@ -199,7 +221,7 @@ const char* getThemeMqttCommand(HueTheme theme) {
         case THEME_GREEN: return "GREEN";
         case THEME_RAINBOW: return "RAINBOW";
         case THEME_PINK_PONY: return "PINK_PONY";
-        case THEME_OCEAN: return "OCEAN_WAVES";
+        case THEME_OCEAN_WAVES: return "OCEAN_WAVES";
         case THEME_SUNSET: return "SUNSET";
         case THEME_FOREST: return "FOREST";
         default: return "GREEN";
@@ -211,7 +233,7 @@ const uint8_t* getCurrentHueArray() {
         case THEME_GREEN: return GREEN_HUES;
         case THEME_RAINBOW: return RAINBOW_HUES;
         case THEME_PINK_PONY: return PINK_PONY_HUES;
-        case THEME_OCEAN: return OCEAN_HUES;
+        case THEME_OCEAN_WAVES: return OCEAN_HUES;
         case THEME_SUNSET: return SUNSET_HUES;
         case THEME_FOREST: return FOREST_HUES;
         default: return GREEN_HUES;
@@ -223,7 +245,7 @@ int getCurrentHueCount() {
         case THEME_GREEN: return NUM_GREEN_HUES;
         case THEME_RAINBOW: return NUM_RAINBOW_HUES;
         case THEME_PINK_PONY: return NUM_PINK_PONY_HUES;
-        case THEME_OCEAN: return NUM_OCEAN_HUES;
+        case THEME_OCEAN_WAVES: return NUM_OCEAN_HUES;
         case THEME_SUNSET: return NUM_SUNSET_HUES;
         case THEME_FOREST: return NUM_FOREST_HUES;
         default: return NUM_GREEN_HUES;
@@ -260,8 +282,28 @@ void saveLedConfigToPreferences() {
     ESP_LOGI(TAG, "LED Config saved: num_leds=%d, leds_per_color=%d", numLeds, ledsPerColor);
 }
 
+void saveDeviceNameToPreferences() {
+    preferences.begin("glow_kitchen", false);
+    preferences.putString("device_name", DEVICE_NAME);
+    preferences.end();
+    ESP_LOGI(TAG, "Device name saved: %s", DEVICE_NAME.c_str());
+}
+
+void saveIrFlagToPreferences() {
+    preferences.begin("glow_kitchen", false);
+    preferences.putBool("enable_ir", irEnabled);
+    preferences.end();
+    ESP_LOGI(TAG, "IR flag saved: %s", irEnabled ? "true" : "false");
+}
+
 void loadAllPreferences() {
     preferences.begin("glow_kitchen", true);
+    
+    // Load device name
+    DEVICE_NAME = preferences.getString("device_name", "");
+    
+    // Load IR flag
+    irEnabled = preferences.getBool("enable_ir", true);
     
     // Load LED count and color group size
     numLeds = preferences.getInt("num_leds", 240);
@@ -312,6 +354,7 @@ void loadAllPreferences() {
     ESP_LOGI(TAG, "Brightness: %d (max: %d)", brightnessToSet, MAX_BRIGHTNESS);
     ESP_LOGI(TAG, "Hue Index: %d (max: %d)", hueIndex, maxHueIndex);
     ESP_LOGI(TAG, "Color Change: %s", colorChangeEnabled ? "enabled" : "disabled");
+    ESP_LOGI(TAG, "IR Enabled: %s", irEnabled ? "true" : "false");
     ESP_LOGI(TAG, "========================");
 }
 
@@ -396,12 +439,13 @@ void toggleAllLEDs() {
 void publishState() {
     if (!mqtt.connected()) return;
 
-    String topic = "lights/" + String(DEVICE_LOCATION) + "/state";
+    String topic = "lights/" + String(getDeviceName()) + "/state";
     String payload = "{\"theme\":\"" + String(THEME_NAMES[currentTheme]) + "\",";
     payload += "\"numLeds\":" + String(numLeds) + ",";
     payload += "\"ledsPerColor\":" + String(ledsPerColor) + ",";
     payload += "\"brightness\":" + String(FastLED.getBrightness()) + ",";
-    payload += "\"ledsEnabled\":" + String(ledsEnabled ? "true" : "false") + "}";
+    payload += "\"ledsEnabled\":" + String(ledsEnabled ? "true" : "false") + ",";
+    payload += "\"irEnabled\":" + String(irEnabled ? "true" : "false") + "}";
 
     mqtt.publish(topic.c_str(), payload.c_str(), true);
     ESP_LOGI(TAG, "Published state to %s", topic.c_str());
@@ -415,7 +459,6 @@ void broadcastCommand(const char* cmd) {
 }
 
 // Button debouncing function
-#if ENABLE_IR
 bool isButtonDebounced(GrayRemoteButton button) {
     unsigned long now = millis();
     
@@ -484,26 +527,28 @@ void handleGrayRemoteButton(GrayRemoteButton button) {
             break;
     }
 }
-#endif
 
 void onMqttMessage(char* topic, byte* payload, unsigned int len) {
     String msg;
     msg.reserve(len);
     for (unsigned int i = 0; i < len; i++) msg += (char)payload[i];
     msg.trim(); // Remove any hidden whitespace/newlines
+    
+    String msgUpper = msg;
+    msgUpper.toUpperCase(); // Ensure case-insensitive matching for commands
 
     ESP_LOGI(TAG, "MQTT Topic: %s, Payload: '%s'", topic, msg.c_str());
 
-    if (msg == "NEXT_THEME") {
+    if (msgUpper == "NEXT_THEME") {
         switchToNextTheme();
         publishState();
-    } else if (msg == "PREV_THEME") {
+    } else if (msgUpper == "PREV_THEME") {
         switchToPreviousTheme();
         publishState();
-    } else if (msg == "STATUS") {
+    } else if (msgUpper == "STATUS") {
         publishState();
-    } else if (msg.startsWith("SET_NUM_LEDS:")) {
-        int val = msg.substring(13).toInt();
+    } else if (msgUpper.startsWith("SET_NUM_LEDS:")) {
+        int val = msgUpper.substring(13).toInt();
         if (val > 0 && val <= MAX_LEDS) {
             numLeds = val;
             saveLedConfigToPreferences();
@@ -511,15 +556,15 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
             FastLED.show();
             publishState();
         }
-    } else if (msg.startsWith("SET_LEDS_PER_COLOR:")) {
-        int val = msg.substring(19).toInt();
+    } else if (msgUpper.startsWith("SET_LEDS_PER_COLOR:")) {
+        int val = msgUpper.substring(19).toInt();
         if (val > 0) {
             ledsPerColor = val;
             saveLedConfigToPreferences();
             publishState();
         }
-    } else if (msg.startsWith("SET_BRIGHTNESS:")) {
-        int val = msg.substring(15).toInt();
+    } else if (msgUpper.startsWith("SET_BRIGHTNESS:")) {
+        int val = msgUpper.substring(15).toInt();
         if (val >= 0 && val <= 255) {
             if (FastLED.getBrightness() != val) {
                 FastLED.setBrightness(val);
@@ -528,26 +573,47 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
                 publishState();
             }
         }
+    } else if (msgUpper.startsWith("SET_DEVICE_NAME:")) {
+        String newName = msg.substring(16); // Use original msg to preserve case
+        newName.trim();
+        if (newName.length() > 0) {
+            DEVICE_NAME = newName;
+            saveDeviceNameToPreferences();
+            
+            // Subscribe to the new name topic immediately
+            String newTopic = "lights/" + DEVICE_NAME + "/cmd";
+            mqtt.subscribe(newTopic.c_str());
+            ESP_LOGI(TAG, "Device name set to: %s and subscribed to %s", DEVICE_NAME.c_str(), newTopic.c_str());
+            
+            publishState();
+        }
+    } else if (msgUpper.startsWith("SET_IR_FLAG:")) {
+        String val = msgUpper.substring(12);
+        val.toLowerCase();
+        irEnabled = (val == "true" || val == "1");
+        saveIrFlagToPreferences();
+        ESP_LOGI(TAG, "IR Flag set to: %s", irEnabled ? "true" : "false");
+        publishState();
     } else {
         HueTheme newTheme = currentTheme;
         bool themeIdentified = false;
 
-        if (msg == "GREEN" || msg == "THEME_GREEN" || msg == "SCENE_1") {
+        if (msgUpper == "GREEN" || msgUpper == "THEME_GREEN" || msgUpper == "SCENE_1") {
             newTheme = THEME_GREEN;
             themeIdentified = true;
-        } else if (msg == "RAINBOW" || msg == "THEME_RAINBOW" || msg == "SCENE_2") {
+        } else if (msgUpper == "RAINBOW" || msgUpper == "THEME_RAINBOW" || msgUpper == "SCENE_2") {
             newTheme = THEME_RAINBOW;
             themeIdentified = true;
-        } else if (msg == "PINK_PONY" || msg == "THEME_PINK_PONY") {
+        } else if (msgUpper == "PINK_PONY" || msgUpper == "THEME_PINK_PONY" || msgUpper == "PINK_PONY_CLUB") {
             newTheme = THEME_PINK_PONY;
             themeIdentified = true;
-        } else if (msg == "OCEAN_WAVES" || msg == "THEME_OCEAN") {
-            newTheme = THEME_OCEAN;
+        } else if (msgUpper == "OCEAN_WAVES" || msgUpper == "THEME_OCEAN_WAVES" || msgUpper == "OCEAN") {
+            newTheme = THEME_OCEAN_WAVES;
             themeIdentified = true;
-        } else if (msg == "SUNSET" || msg == "THEME_SUNSET") {
+        } else if (msgUpper == "SUNSET" || msgUpper == "THEME_SUNSET") {
             newTheme = THEME_SUNSET;
             themeIdentified = true;
-        } else if (msg == "FOREST" || msg == "THEME_FOREST") {
+        } else if (msgUpper == "FOREST" || msgUpper == "THEME_FOREST") {
             newTheme = THEME_FOREST;
             themeIdentified = true;
         }
@@ -569,31 +635,31 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
             return;
         }
 
-        if (msg == "TOGGLE") {
+        if (msgUpper == "TOGGLE") {
             toggleAllLEDs();
             publishState();
-        } else if (msg == "ON") {
+        } else if (msgUpper == "ON") {
             if (!ledsEnabled) {
                 toggleAllLEDs();
                 publishState();
             }
-        } else if (msg == "OFF") {
+        } else if (msgUpper == "OFF") {
             if (ledsEnabled) {
                 toggleAllLEDs();
                 publishState();
             }
-        } else if (msg == "BRIGHT_UP") {
+        } else if (msgUpper == "BRIGHT_UP") {
             increaseBrightness();
             publishState();
-        } else if (msg == "BRIGHT_DOWN") {
+        } else if (msgUpper == "BRIGHT_DOWN") {
             decreaseBrightness();
             publishState();
-        } else if (msg == "COLOR_CHANGE_ON") {
+        } else if (msgUpper == "COLOR_CHANGE_ON") {
             if (!colorChangeEnabled) {
                 colorChangeEnabled = true;
                 publishState();
             }
-        } else if (msg == "COLOR_CHANGE_OFF") {
+        } else if (msgUpper == "COLOR_CHANGE_OFF") {
             if (colorChangeEnabled) {
                 colorChangeEnabled = false;
                 publishState();
@@ -639,16 +705,24 @@ void ensureMqtt() {
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
     mqtt.setCallback(onMqttMessage);
 
-    String clientId = "esp32c3-glowkitchen-" + String(DEVICE_LOCATION) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+    String clientId = "esp32c3-glowkitchen-" + String(getDeviceName()) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
 
     ESP_LOGI(TAG, "MQTT connecting to %s...", MQTT_HOST);
     if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
         ESP_LOGI(TAG, "MQTT connected; subscribing...");
         mqtt.subscribe("lights/all/cmd");
         
-        String locationTopic = "lights/" + String(DEVICE_LOCATION) + "/cmd";
-        mqtt.subscribe(locationTopic.c_str());
-        ESP_LOGI(TAG, "Subscribed to %s", locationTopic.c_str());
+        // Always subscribe to hardware-based ID topic
+        String idTopic = "lights/" + getDeviceId() + "/cmd";
+        mqtt.subscribe(idTopic.c_str());
+        ESP_LOGI(TAG, "Subscribed to %s", idTopic.c_str());
+        
+        // Also subscribe to name-based topic if a name is set and it's different from the ID
+        if (DEVICE_NAME.length() > 0 && DEVICE_NAME != getDeviceId()) {
+            String nameTopic = "lights/" + DEVICE_NAME + "/cmd";
+            mqtt.subscribe(nameTopic.c_str());
+            ESP_LOGI(TAG, "Subscribed to name-based topic: %s", nameTopic.c_str());
+        }
 
         // Report initial state
         publishState();
@@ -658,7 +732,6 @@ void ensureMqtt() {
 }
 
 // Function to identify button from IR data
-#if ENABLE_IR
 GrayRemoteButton identifyGrayRemoteButton(uint8_t address, uint8_t command) {
     if (address != NEC_REMOTE_ADDRESS) {
         return NEC_UNKNOWN;
@@ -689,7 +762,6 @@ GrayRemoteButton identifyGrayRemoteButton(uint8_t address, uint8_t command) {
         default: return NEC_UNKNOWN;
     }
 }
-#endif
 
 void flickerLEDs() {
     bool didChange = false;
@@ -761,7 +833,7 @@ void slowBlend() {
             
             // Only blend if colors are close together (within 60 hue units)
             // This allows Pink Pony Club (55 unit span) to blend smoothly
-            // while preventing blending across larger gaps in Halloween (84 units) and Christmas (65 units)
+            // while preventing blending across larger gaps in themes with wide hue spans
             const int BLEND_THRESHOLD = 60;
             
             if (shortestDistance <= BLEND_THRESHOLD) {
@@ -775,7 +847,7 @@ void slowBlend() {
                 }
             } else {
                 // Colors are too far apart - don't blend, just use current color
-                // This keeps Halloween oranges separate from purples, Christmas reds separate from greens
+                // This keeps themes with large hue differences separate from each other
                 blendedHue = currentHue;
             }
             
@@ -818,7 +890,6 @@ void setupLED() {
     logTimeout = now + logInterval;
 }
 
-#if ENABLE_IR
 void setupIR() {    
     // Initialize IR receiver
     IrReceiver.begin(irReceiverPin, DISABLE_LED_FEEDBACK);
@@ -826,7 +897,6 @@ void setupIR() {
     ESP_LOGI(TAG, "IR receiver initialized on pin %d", irReceiverPin);
     ESP_LOGI(TAG, "IR receiver ready: %s", IrReceiver.isIdle() ? "true" : "false");
 }
-#endif
 
 void loopLED() {    
     unsigned long now = millis();
@@ -853,12 +923,13 @@ void loopLED() {
     if (currentTheme == THEME_GREEN) {
         flickerLEDs();  // Candle flicker effect for green theme
     } else {
-        slowBlend();    // Gradient blend effect for rainbow, halloween, christmas
+        slowBlend();    // Gradient blend effect for rainbow, ocean, sunset and forest
     }
 }
 
-#if ENABLE_IR
 void loopIR() {
+    if (!irEnabled) return;
+    
     unsigned long now = millis();
 
     // Check if an IR signal is received
@@ -944,15 +1015,12 @@ void loopIR() {
         irLogTimeout = now + irLogInterval;
     }
 }
-#endif
 
 void setup() {
     Serial.begin(115200);
 
     setupLED();
-#if ENABLE_IR
     setupIR();
-#endif
     
     ensureWifi();
 }
@@ -962,7 +1030,5 @@ void loop() {
     ensureMqtt();
     
     loopLED();
-#if ENABLE_IR
     loopIR();
-#endif
 }

@@ -3,18 +3,27 @@
 
 #include <Arduino.h>
 
-const char* WIFI_SSID = "";
-const char* WIFI_PASS = "";
+// These are static so each file that includes Config.h gets its own copy.
+static const char* WIFI_SSID = "YOUR_WIFI_SSID";
+static const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
 
-const char* MQTT_HOST = "";
-const uint16_t MQTT_PORT = 1883;
-const char* MQTT_USER = "";
-const char* MQTT_PASS = "";
+static const char* MQTT_HOST = "YOUR_MQTT_BROKER_IP";
+static const uint16_t MQTT_PORT = 1883;
+static const char* MQTT_USER = "mqtt";
+static const char* MQTT_PASS = "YOUR_MQTT_PASSWORD";
 
-// Device Location (change this for each board: "kitchen", "tv", or "desk")
-const char* DEVICE_LOCATION = "";
+// Initial values for mutable globals (can be changed via MQTT)
+// These are defined here via macros so they stay out of source control
+#define INITIAL_DEVICE_NAME ""
+#define INITIAL_IR_ENABLED true
 
-// Enable or Disable IR Receiver (only 1 install has it)
-#define ENABLE_IR true
+extern String DEVICE_NAME;
+extern bool irEnabled;
+
+// Function declarations
+String deviceIdFromMac();
+String deviceIdFromMacCompact();
+String getDeviceId();
+String getDeviceName();
 
 #endif // CONFIG_H

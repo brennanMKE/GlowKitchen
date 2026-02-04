@@ -7,3 +7,5 @@
 .vscode/ipch
 
 lib/Config/Config.h
+
+opencode.json
