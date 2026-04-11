@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration
-BROKER="192.168.88.254"
+BROKER="homeassistant.local"
 TOPIC="lights/all/cmd"
 STATE_FILE="$HOME/.glow_kitchen_theme"
 

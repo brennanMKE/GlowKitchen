@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration
-BROKER="192.168.88.254"
+BROKER="homeassistant.local"
 
 # Check arguments
 if [ "$#" -lt 2 ]; then
