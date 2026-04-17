@@ -6,6 +6,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <esp_wifi.h>
 
 static const char *TAG = "MAIN";
 
@@ -297,18 +298,19 @@ void saveIrFlagToPreferences() {
 }
 
 void loadAllPreferences() {
+    ESP_LOGI(TAG, "loadAllPreferences()");
     preferences.begin("glow_kitchen", true);
-    
+
     // Load device name
-    DEVICE_NAME = preferences.getString("device_name", "");
-    
+    DEVICE_NAME = preferences.getString("device_name", INITIAL_DEVICE_NAME);
+
     // Load IR flag
     irEnabled = preferences.getBool("enable_ir", true);
-    
-    // Load LED count and color group size
+
+    // Load LED count - use default if not in preferences
     numLeds = preferences.getInt("num_leds", 240);
     ledsPerColor = preferences.getInt("leds_per_color", 25);
-    
+
     // Safety check
     if (numLeds > MAX_LEDS) numLeds = MAX_LEDS;
     if (numLeds < 1) numLeds = 1;
@@ -672,12 +674,27 @@ void ensureWifi() {
     if (WiFi.status() == WL_CONNECTED) return;
 
     ESP_LOGI(TAG, "WiFi connecting to %s...", WIFI_SSID);
-    WiFi.mode(WIFI_STA);
+
+    // eero mesh network compatibility fixes
+    WiFi.mode(WIFI_STA);  // Initialize mode FIRST before other settings
+
+    // Lower transmit power to prevent overloading eero receivers
+    if (WiFi.setTxPower(WIFI_POWER_8_5dBm)) {
+        ESP_LOGI(TAG, "Set transmit power to 8.5dBm (eero compatibility)");
+    }
+
+    // Disable 802.11n to avoid mesh interference - use b/g only
+    esp_err_t result = esp_wifi_set_protocol(WIFI_IF_STA,
+                                              WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
+    if (result == ESP_OK) {
+        ESP_LOGI(TAG, "Set WiFi protocol to 802.11b/g (disabled 802.11n)");
+    }
+
     WiFi.begin(WIFI_SSID, WIFI_PASS);
 
     // Quick connect attempt (non-blocking in loop, but here we wait a bit in setup or first run)
     uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 5000) {
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {  // 30 second timeout
         delay(100);
         Serial.print(".");
     }

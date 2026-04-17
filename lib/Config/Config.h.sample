@@ -2,8 +2,10 @@
 #define CONFIG_H
 
 #include <Arduino.h>
+#include <WiFi.h>
 
 // These are static so each file that includes Config.h gets its own copy.
+// For constants, this is generally fine on ESP32.
 static const char* WIFI_SSID = "YOUR_WIFI_SSID";
 static const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
 
@@ -12,10 +14,10 @@ static const uint16_t MQTT_PORT = 1883;
 static const char* MQTT_USER = "mqtt";
 static const char* MQTT_PASS = "YOUR_MQTT_PASSWORD";
 
-// Initial values for mutable globals (can be changed via MQTT)
-// These are defined here via macros so they stay out of source control
+// For non-constants, we use extern and define them in Config.cpp
+// but we keep the initial values here via macros so they aren't in source control.
 #define INITIAL_DEVICE_NAME ""
-#define INITIAL_IR_ENABLED true
+#define INITIAL_IR_ENABLED false
 
 extern String DEVICE_NAME;
 extern bool irEnabled;
