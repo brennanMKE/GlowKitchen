@@ -1,32 +1,56 @@
-#!/bin/bash
+#!/bin/zsh
 
 # Configuration
 BROKER="homeassistant.local"
 
 # Check arguments
-if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 [location] [numLeds] [optional: ledsPerColor]"
-    echo "Locations: kitchen, tv, desk, all"
-    echo "Example: $0 tv 120 15"
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 [device] [option] [value]"
+    echo ""
+    echo "Options:"
+    echo "  num_leds <count>        Set number of LEDs"
+    echo "  leds_per_color <count>  Set LEDs per color"
+    echo "  brightness <0-255>      Set brightness"
+    echo "  name <name>             Rename device"
+    echo "  ir <true|false>         Enable/disable IR receiver"
+    echo ""
+    echo "Examples:"
+    echo "  $0 kitchen num_leds 240"
+    echo "  $0 desk brightness 200"
+    echo "  $0 all ir false"
     exit 1
 fi
 
-LOCATION=$1
-NUM_LEDS=$2
-LEDS_PER_COLOR=$3
+DEVICE=$1
+OPTION=$2
+VALUE=$3
 
-TOPIC="lights/$LOCATION/cmd"
+TOPIC="lights/$DEVICE/cmd"
 
-# Set Number of LEDs
-echo "Sending SET_NUM_LEDS:$NUM_LEDS to $TOPIC..."
+case "$OPTION" in
+    num_leds)
+        PAYLOAD="SET_NUM_LEDS:$VALUE"
+        ;;
+    leds_per_color)
+        PAYLOAD="SET_LEDS_PER_COLOR:$VALUE"
+        ;;
+    brightness)
+        PAYLOAD="SET_BRIGHTNESS:$VALUE"
+        ;;
+    name)
+        PAYLOAD="SET_DEVICE_NAME:$VALUE"
+        ;;
+    ir)
+        PAYLOAD="SET_IR_FLAG:$VALUE"
+        ;;
+    *)
+        echo "Error: Unknown option '$OPTION'"
+        exit 1
+        ;;
+esac
+
+echo "Sending $PAYLOAD to $TOPIC..."
 /opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
-  -t "$TOPIC" -m "SET_NUM_LEDS:$NUM_LEDS"
-
-# Set LEDs Per Color if provided
-if [ -n "$LEDS_PER_COLOR" ]; then
-    echo "Sending SET_LEDS_PER_COLOR:$LEDS_PER_COLOR to $TOPIC..."
-    /opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
-      -t "$TOPIC" -m "SET_LEDS_PER_COLOR:$LEDS_PER_COLOR"
-fi
+  -t "$TOPIC" -m "$PAYLOAD"
 
 echo "Configuration sent."

@@ -1,32 +1,36 @@
-#!/bin/bash
+#!/bin/zsh
 
 # Configuration
 BROKER="homeassistant.local"
 
 # Check arguments
-if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 [location] [UP|DOWN]"
-    echo "Locations: kitchen, tv, desk, all"
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 [device] [UP|DOWN]"
+    echo "Device: device name or 'all' for broadcast"
     echo "Example: $0 all UP"
     exit 1
 fi
 
-LOCATION=$1
+DEVICE=$1
 ACTION=$2
 
 # Standardize action to uppercase
-ACTION=$(echo "$ACTION" | tr '[:lower:]' '[:upper:]')
+ACTION=${(U)ACTION}
 
-if [ "$ACTION" == "UP" ]; then
-    PAYLOAD="BRIGHT_UP"
-elif [ "$ACTION" == "DOWN" ]; then
-    PAYLOAD="BRIGHT_DOWN"
-else
-    echo "Error: Action must be UP or DOWN"
-    exit 1
-fi
+case "$ACTION" in
+    UP)
+        PAYLOAD="BRIGHT_UP"
+        ;;
+    DOWN)
+        PAYLOAD="BRIGHT_DOWN"
+        ;;
+    *)
+        echo "Error: Action must be UP or DOWN"
+        exit 1
+        ;;
+esac
 
-TOPIC="lights/$LOCATION/cmd"
+TOPIC="lights/$DEVICE/cmd"
 
 echo "Sending $PAYLOAD to $TOPIC..."
 /opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \

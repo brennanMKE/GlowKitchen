@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/zsh
 
 sleep 3
 ./scripts/set_theme.sh all GREEN
