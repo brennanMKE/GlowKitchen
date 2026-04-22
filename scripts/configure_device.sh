@@ -13,6 +13,7 @@ if [[ $# -lt 2 ]]; then
     echo "  brightness <0-255>      Set brightness"
     echo "  name <name>             Rename device"
     echo "  ir <true|false>         Enable/disable IR receiver"
+    echo "  mirror <true|false>     Enable/disable mirror mode"
     echo ""
     echo "Examples:"
     echo "  $0 kitchen num_leds 240"
@@ -42,6 +43,9 @@ case "$OPTION" in
         ;;
     ir)
         PAYLOAD="SET_IR_FLAG:$VALUE"
+        ;;
+    mirror)
+        PAYLOAD="SET_MIRROR:$VALUE"
         ;;
     *)
         echo "Error: Unknown option '$OPTION'"

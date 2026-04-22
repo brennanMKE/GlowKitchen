@@ -152,6 +152,7 @@ const int NUM_FOREST_HUES = sizeof(FOREST_HUES) / sizeof(FOREST_HUES[0]);
 HueTheme currentTheme = THEME_GREEN;
 bool colorChangeEnabled = true;
 bool ledsEnabled = true;  // Global LED state - true = on, false = off
+bool mirrorEnabled = false;  // Mirror mode for bi-directional strips
 int hueIndex = 0;
 unsigned long hueTimeout = 0;
 unsigned long logTimeout = 0;
@@ -297,6 +298,13 @@ void saveIrFlagToPreferences() {
     ESP_LOGI(TAG, "IR flag saved: %s", irEnabled ? "true" : "false");
 }
 
+void saveMirrorToPreferences() {
+    preferences.begin("glow_kitchen", false);
+    preferences.putBool("mirror_mode", mirrorEnabled);
+    preferences.end();
+    ESP_LOGI(TAG, "Mirror mode saved: %s", mirrorEnabled ? "true" : "false");
+}
+
 void loadAllPreferences() {
     ESP_LOGI(TAG, "loadAllPreferences()");
     preferences.begin("glow_kitchen", true);
@@ -306,6 +314,9 @@ void loadAllPreferences() {
 
     // Load IR flag
     irEnabled = preferences.getBool("enable_ir", true);
+
+    // Load mirror mode
+    mirrorEnabled = preferences.getBool("mirror_mode", false);
 
     // Load LED count - use default if not in preferences
     numLeds = preferences.getInt("num_leds", 240);
@@ -356,6 +367,7 @@ void loadAllPreferences() {
     ESP_LOGI(TAG, "Brightness: %d (max: %d)", brightnessToSet, MAX_BRIGHTNESS);
     ESP_LOGI(TAG, "Hue Index: %d (max: %d)", hueIndex, maxHueIndex);
     ESP_LOGI(TAG, "Color Change: %s", colorChangeEnabled ? "enabled" : "disabled");
+    ESP_LOGI(TAG, "Mirror Mode: %s", mirrorEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "IR Enabled: %s", irEnabled ? "true" : "false");
     ESP_LOGI(TAG, "========================");
 }
@@ -447,6 +459,7 @@ void publishState() {
     payload += "\"ledsPerColor\":" + String(ledsPerColor) + ",";
     payload += "\"brightness\":" + String(FastLED.getBrightness()) + ",";
     payload += "\"ledsEnabled\":" + String(ledsEnabled ? "true" : "false") + ",";
+    payload += "\"mirrorEnabled\":" + String(mirrorEnabled ? "true" : "false") + ",";
     payload += "\"irEnabled\":" + String(irEnabled ? "true" : "false") + "}";
 
     mqtt.publish(topic.c_str(), payload.c_str(), true);
@@ -596,6 +609,13 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         saveIrFlagToPreferences();
         ESP_LOGI(TAG, "IR Flag set to: %s", irEnabled ? "true" : "false");
         publishState();
+    } else if (msgUpper.startsWith("SET_MIRROR:")) {
+        String val = msgUpper.substring(11);
+        val.toLowerCase();
+        mirrorEnabled = (val == "true" || val == "1");
+        saveMirrorToPreferences();
+        ESP_LOGI(TAG, "Mirror mode set to: %s", mirrorEnabled ? "true" : "false");
+        publishState();
     } else {
         HueTheme newTheme = currentTheme;
         bool themeIdentified = false;
@@ -666,6 +686,22 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
                 colorChangeEnabled = false;
                 publishState();
             }
+        } else if (msgUpper == "MIRROR_ON") {
+            if (!mirrorEnabled) {
+                mirrorEnabled = true;
+                saveMirrorToPreferences();
+                publishState();
+            }
+        } else if (msgUpper == "MIRROR_OFF") {
+            if (mirrorEnabled) {
+                mirrorEnabled = false;
+                saveMirrorToPreferences();
+                publishState();
+            }
+        } else if (msgUpper == "TOGGLE_MIRROR") {
+            mirrorEnabled = !mirrorEnabled;
+            saveMirrorToPreferences();
+            publishState();
         }
     }
 }
@@ -815,6 +851,15 @@ void flickerLEDs() {
     }
 }
 
+// Mirror the first half of the strip onto the second half in reverse (palindrome effect)
+void applyMirror() {
+    int half = numLeds / 2;
+    for (int i = 0; i < half; i++) {
+        leds[numLeds - 1 - i] = leds[i];
+    }
+    FastLED.show();
+}
+
 void slowBlend() {
     unsigned long now = millis();
     
@@ -874,8 +919,12 @@ void slowBlend() {
             
             leds[i] = CHSV(blendedHue, 255, brightness);
         }
-        
-        FastLED.show();
+
+        if (mirrorEnabled) {
+            applyMirror();
+        } else {
+            FastLED.show();
+        }
         blendTimeout = now + blendInterval;
         
         // Slowly rotate the color groups if color change is enabled
