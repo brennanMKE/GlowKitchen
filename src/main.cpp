@@ -7,8 +7,20 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <esp_wifi.h>
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
+#include <WiFiClientSecure.h>
+#include <time.h>
 
 static const char *TAG = "MAIN";
+
+static const char *FIRMWARE_VERSION = "0.0.1";
+
+// Mozilla CA bundle embedded in the ESP32 SDK (supplied by ESP-IDF mbedTLS component)
+extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
+
+// Forward declarations for OTA (called from onMqttMessage before definition)
+void checkForOtaUpdate(bool manual);
 
 /// DEVELOPMENT OVERRIDE
 // Set to a valid theme index (0-5) to force that theme, or -1 to use saved preferences
@@ -460,7 +472,8 @@ void publishState() {
     payload += "\"brightness\":" + String(FastLED.getBrightness()) + ",";
     payload += "\"ledsEnabled\":" + String(ledsEnabled ? "true" : "false") + ",";
     payload += "\"mirrorEnabled\":" + String(mirrorEnabled ? "true" : "false") + ",";
-    payload += "\"irEnabled\":" + String(irEnabled ? "true" : "false") + "}";
+    payload += "\"irEnabled\":" + String(irEnabled ? "true" : "false") + ",";
+    payload += "\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"}";
 
     mqtt.publish(topic.c_str(), payload.c_str(), true);
     ESP_LOGI(TAG, "Published state to %s", topic.c_str());
@@ -702,6 +715,8 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
             mirrorEnabled = !mirrorEnabled;
             saveMirrorToPreferences();
             publishState();
+        } else if (msgUpper == "OTA_UPDATE" || msgUpper == "OTA_CHECK") {
+            checkForOtaUpdate(true);
         }
     }
 }
@@ -1082,19 +1097,155 @@ void loopIR() {
     }
 }
 
+// ---- OTA ----
+
+void checkForOtaUpdate(bool manual) {
+    ESP_LOGI(TAG, "OTA: checking for update (manual=%s, current=%s)", manual ? "true" : "false", FIRMWARE_VERSION);
+
+    WiFiClientSecure client;
+    client.setCACertBundle(rootca_crt_bundle_start);
+
+    // Fetch latest release tag from GitHub API
+    HTTPClient http;
+    http.begin(client, "https://api.github.com/repos/brennanMKE/GlowKitchen/releases/latest");
+    http.addHeader("User-Agent", "GlowKitchen-OTA");
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        ESP_LOGW(TAG, "OTA: GitHub API returned HTTP %d", code);
+        http.end();
+        return;
+    }
+
+    // Lightweight tag_name extraction — no ArduinoJson dependency
+    String body = http.getString();
+    http.end();
+
+    int idx = body.indexOf("\"tag_name\"");
+    if (idx < 0) {
+        ESP_LOGW(TAG, "OTA: tag_name not found in response");
+        return;
+    }
+    int q1 = body.indexOf('"', idx + 10);  // opening quote of value
+    int q2 = body.indexOf('"', q1 + 1);    // closing quote
+    if (q1 < 0 || q2 < 0) {
+        ESP_LOGW(TAG, "OTA: could not parse tag_name value");
+        return;
+    }
+    String tagName = body.substring(q1 + 1, q2);
+    // Strip leading 'v' if present
+    if (tagName.length() > 0 && tagName[0] == 'v') {
+        tagName = tagName.substring(1);
+    }
+    ESP_LOGI(TAG, "OTA: latest tag=%s, running=%s", tagName.c_str(), FIRMWARE_VERSION);
+
+    if (tagName == String(FIRMWARE_VERSION)) {
+        ESP_LOGI(TAG, "OTA: already up to date");
+        return;
+    }
+
+    ESP_LOGI(TAG, "OTA: update available, downloading firmware...");
+
+    // Progress visibility during the ~1 MB write (otherwise a silent 10-30s gap)
+    httpUpdate.onStart([]() {
+        ESP_LOGI(TAG, "OTA: download/flash started");
+    });
+    httpUpdate.onProgress([](int done, int total) {
+        ESP_LOGI(TAG, "OTA: progress %d%% (%d/%d bytes)",
+                 total ? (done * 100 / total) : 0, done, total);
+    });
+    httpUpdate.onError([](int err) {
+        ESP_LOGE(TAG, "OTA: error %d: %s", err, httpUpdate.getLastErrorString().c_str());
+    });
+
+    // Take control of the reboot so we can log + flush UART before resetting
+    httpUpdate.rebootOnUpdate(false);
+    httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    t_httpUpdate_return ret = httpUpdate.update(client,
+        "https://github.com/brennanMKE/GlowKitchen/releases/latest/download/firmware.bin");
+
+    switch (ret) {
+        case HTTP_UPDATE_OK:
+            ESP_LOGI(TAG, "OTA: update written, rebooting into new firmware now");
+            Serial.flush();      // ensure the line is sent over UART before reset
+            delay(100);
+            ESP.restart();
+            break;
+        case HTTP_UPDATE_NO_UPDATES:
+            ESP_LOGI(TAG, "OTA: server says no update needed");
+            break;
+        case HTTP_UPDATE_FAILED:
+            ESP_LOGE(TAG, "OTA: update failed, error=%d: %s",
+                     httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+            break;
+    }
+}
+
+void loopOta() {
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    // Configure NTP once after first WiFi connect
+    static bool timeConfigured = false;
+    static uint32_t wifiConnectedAt = 0;
+    if (!timeConfigured) {
+        configTzTime("CST6CDT,M3.2.0,M11.1.0/2", "pool.ntp.org", "time.nist.gov");
+        timeConfigured = true;
+        wifiConnectedAt = millis();
+        ESP_LOGI(TAG, "OTA: NTP time sync configured");
+    }
+
+    // One-time startup check, a short delay after joining WiFi. Handy for local
+    // testing — does not depend on NTP (the check queries the GitHub API directly).
+    static const uint32_t STARTUP_OTA_DELAY_MS = 15000;  // adjust as needed
+    static bool startupCheckDone = false;
+    if (!startupCheckDone && (millis() - wifiConnectedAt) >= STARTUP_OTA_DELAY_MS) {
+        startupCheckDone = true;
+        ESP_LOGI(TAG, "OTA: startup check (%us after WiFi join)", STARTUP_OTA_DELAY_MS / 1000);
+        checkForOtaUpdate(true);
+        return;
+    }
+
+    // Nightly scheduler — run OTA check once per day at 03:00 local time
+    struct tm now;
+    if (!getLocalTime(&now, 0)) return;            // not synced yet
+    if (now.tm_year + 1900 < 2020) return;         // clock not valid
+
+    if (now.tm_hour != 3) return;                  // only in the 03:xx hour
+
+    // Load last-run day from Preferences and skip if already ran today
+    preferences.begin("glow_kitchen", true);
+    int lastYday = preferences.getInt("ota_last_yday", -1);
+    preferences.end();
+    if (lastYday == now.tm_yday) return;           // already ran today
+
+    // Persist the day BEFORE checking: a successful update reboots from inside
+    // checkForOtaUpdate() and never returns, so marking it first keeps the
+    // once-per-day guard intact across the post-update reboot near 03:00.
+    preferences.begin("glow_kitchen", false);
+    preferences.putInt("ota_last_yday", now.tm_yday);
+    preferences.end();
+
+    ESP_LOGI(TAG, "OTA: nightly check triggered (yday=%d)", now.tm_yday);
+    checkForOtaUpdate(false);
+}
+
+// ---- Setup / Loop ----
+
 void setup() {
     Serial.begin(115200);
 
+    ESP_LOGI(TAG, "Booted firmware %s", FIRMWARE_VERSION);
+
     setupLED();
     setupIR();
-    
+
     ensureWifi();
 }
 
 void loop() {
     ensureWifi();
     ensureMqtt();
-    
+
     loopLED();
     loopIR();
+    loopOta();
 }
