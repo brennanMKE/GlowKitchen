@@ -14,13 +14,16 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.0.2"
+#define FIRMWARE_VERSION "0.0.3"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
-// (see scripts/firmware_info.sh). __attribute__((used)) keeps the linker from
-// stripping it, since nothing in the code references it.
+// (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
+// this toolchain — the linker's --gc-sections still drops it because nothing
+// references it. fwVersionMarkerAnchor (assigned in setup()) is a volatile
+// reference that pins the marker into the binary at any optimization/log level.
 static const char FW_VERSION_MARKER[] __attribute__((used)) =
     "GLOWKITCHEN_FWVER=" FIRMWARE_VERSION;
+static const char *volatile fwVersionMarkerAnchor;
 
 // Mozilla CA bundle embedded in the ESP32 SDK (supplied by ESP-IDF mbedTLS component)
 extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
@@ -1239,6 +1242,7 @@ void loopOta() {
 void setup() {
     Serial.begin(115200);
 
+    fwVersionMarkerAnchor = FW_VERSION_MARKER;  // pin the version marker into the binary
     ESP_LOGI(TAG, "Booted firmware %s", FIRMWARE_VERSION);
 
     setupLED();

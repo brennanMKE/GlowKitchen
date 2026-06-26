@@ -46,8 +46,10 @@ while IFS= read -r line; do
     numLeds=$(printf '%s\n' "$payload" | jq -r '.numLeds // "?"' 2>/dev/null)
     ledsEnabled=$(printf '%s\n' "$payload" | jq -r '.ledsEnabled // "?"' 2>/dev/null)
     irEnabled=$(printf '%s\n' "$payload" | jq -r '.irEnabled // "unknown"' 2>/dev/null)
+    firmwareVersion=$(printf '%s\n' "$payload" | jq -r '.firmwareVersion // "unknown"' 2>/dev/null)
 
     echo "Device: $device"
+    echo "  Firmware: $firmwareVersion"
     echo "  Theme: $theme"
     echo "  LEDs: $numLeds (enabled: $ledsEnabled)"
     echo "  Brightness: $brightness"
