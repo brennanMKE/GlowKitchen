@@ -65,6 +65,22 @@ These commands update the hardware settings in the device's persistent memory.
 | `SET_NUM_LEDS:` | `SET_NUM_LEDS:150` | Sets the total number of LEDs connected (Max: 500). |
 | `SET_LEDS_PER_COLOR:` | `SET_LEDS_PER_COLOR:15` | Sets the number of LEDs per color group in animations. |
 
+### Firmware Updates
+
+| Payload Prefix | Example | Description |
+| :--- | :--- | :--- |
+| `OTA_UPDATE` | `OTA_UPDATE` | Check GitHub for the latest release and install it if the tag differs. |
+| `OTA_CHECK` | `OTA_CHECK` | Same as `OTA_UPDATE`. |
+| `OTA_URL:` | `OTA_URL:http://192.168.1.50:8000/firmware.bin` | Install firmware directly from a URL, skipping the version check. |
+| `OTA_AUTO:` | `OTA_AUTO:false` | Enable/disable the automatic startup and nightly GitHub checks. |
+
+`OTA_URL` is deliberately restricted, because it installs an unsigned binary:
+
+*   **Refused on `lights/all/cmd`.** It must be sent to a single device's topic, so one stray broadcast cannot re-flash the whole fleet.
+*   **The host must be on the local network** — an mDNS `.local` name, an address on the device's own subnet, or a private range (`10.x`, `192.168.x`, `172.16–31.x`). Public addresses and bare DNS names are rejected.
+
+Set `OTA_AUTO:false` before pushing a local build, otherwise the automatic check will replace it with the released tag roughly 15 seconds after the device's next boot (the comparison is "tag differs", not "tag is newer", so it downgrades). Re-enable with `OTA_AUTO:true` when finished.
+
 ---
 
 ## Helper Scripts

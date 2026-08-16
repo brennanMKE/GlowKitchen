@@ -14,7 +14,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.0.3"
+#define FIRMWARE_VERSION "0.0.4"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
@@ -27,9 +27,12 @@ static const char *volatile fwVersionMarkerAnchor;
 
 // Mozilla CA bundle embedded in the ESP32 SDK (supplied by ESP-IDF mbedTLS component)
 extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
+extern const uint8_t rootca_crt_bundle_end[] asm("_binary_x509_crt_bundle_end");
 
 // Forward declarations for OTA (called from onMqttMessage before definition)
 void checkForOtaUpdate(bool manual);
+void performOtaFromUrl(const String& url);
+bool isLocalNetworkUrl(const String& url);
 
 /// DEVELOPMENT OVERRIDE
 // Set to a valid theme index (0-5) to force that theme, or -1 to use saved preferences
@@ -174,6 +177,10 @@ HueTheme currentTheme = THEME_GREEN;
 bool colorChangeEnabled = true;
 bool ledsEnabled = true;  // Global LED state - true = on, false = off
 bool mirrorEnabled = false;  // Mirror mode for bi-directional strips
+// Automatic GitHub OTA checks (startup + nightly). Turned off with OTA_AUTO:false
+// while a device runs a locally-pushed dev build, which would otherwise be
+// replaced by the released tag within ~15s of its next boot.
+bool otaAutoEnabled = true;
 int hueIndex = 0;
 unsigned long hueTimeout = 0;
 unsigned long logTimeout = 0;
@@ -326,6 +333,13 @@ void saveMirrorToPreferences() {
     ESP_LOGI(TAG, "Mirror mode saved: %s", mirrorEnabled ? "true" : "false");
 }
 
+void saveOtaAutoToPreferences() {
+    preferences.begin("glow_kitchen", false);
+    preferences.putBool("ota_auto", otaAutoEnabled);
+    preferences.end();
+    ESP_LOGI(TAG, "OTA auto-update saved: %s", otaAutoEnabled ? "true" : "false");
+}
+
 void loadAllPreferences() {
     ESP_LOGI(TAG, "loadAllPreferences()");
     preferences.begin("glow_kitchen", true);
@@ -338,6 +352,9 @@ void loadAllPreferences() {
 
     // Load mirror mode
     mirrorEnabled = preferences.getBool("mirror_mode", false);
+
+    // Load OTA auto-update flag
+    otaAutoEnabled = preferences.getBool("ota_auto", true);
 
     // Load LED count - use default if not in preferences
     numLeds = preferences.getInt("num_leds", 240);
@@ -390,6 +407,7 @@ void loadAllPreferences() {
     ESP_LOGI(TAG, "Color Change: %s", colorChangeEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "Mirror Mode: %s", mirrorEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "IR Enabled: %s", irEnabled ? "true" : "false");
+    ESP_LOGI(TAG, "OTA Auto: %s", otaAutoEnabled ? "true" : "false");
     ESP_LOGI(TAG, "========================");
 }
 
@@ -482,6 +500,7 @@ void publishState() {
     payload += "\"ledsEnabled\":" + String(ledsEnabled ? "true" : "false") + ",";
     payload += "\"mirrorEnabled\":" + String(mirrorEnabled ? "true" : "false") + ",";
     payload += "\"irEnabled\":" + String(irEnabled ? "true" : "false") + ",";
+    payload += "\"otaAuto\":" + String(otaAutoEnabled ? "true" : "false") + ",";
     payload += "\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"}";
 
     mqtt.publish(topic.c_str(), payload.c_str(), true);
@@ -637,6 +656,29 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         mirrorEnabled = (val == "true" || val == "1");
         saveMirrorToPreferences();
         ESP_LOGI(TAG, "Mirror mode set to: %s", mirrorEnabled ? "true" : "false");
+        publishState();
+    } else if (msgUpper.startsWith("OTA_URL:")) {
+        // Use the original-case msg — URLs are case-sensitive and msgUpper is not.
+        String url = msg.substring(8);
+        url.trim();
+        // Deliberately refused on lights/all/cmd: a stray broadcast here would
+        // re-flash the entire fleet from one unverified URL at once.
+        if (String(topic).indexOf("/all/") >= 0) {
+            ESP_LOGW(TAG, "OTA: refusing OTA_URL on a broadcast topic (%s)", topic);
+        } else if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            ESP_LOGW(TAG, "OTA: ignoring OTA_URL with unsupported scheme: '%s'", url.c_str());
+        } else if (!isLocalNetworkUrl(url)) {
+            ESP_LOGW(TAG, "OTA: refusing OTA_URL outside the local network: %s", url.c_str());
+        } else {
+            ESP_LOGI(TAG, "OTA: manual URL update requested: %s", url.c_str());
+            performOtaFromUrl(url);
+        }
+    } else if (msgUpper.startsWith("OTA_AUTO:")) {
+        String val = msgUpper.substring(9);
+        val.toLowerCase();
+        otaAutoEnabled = (val == "true" || val == "1");
+        saveOtaAutoToPreferences();
+        ESP_LOGI(TAG, "OTA auto-update set to: %s", otaAutoEnabled ? "true" : "false");
         publishState();
     } else {
         HueTheme newTheme = currentTheme;
@@ -886,25 +928,25 @@ void applyMirror() {
 
 void slowBlend() {
     unsigned long now = millis();
-    
+
     // Update blend animation
     if (blendTimeout < now) {
         const uint8_t* currentHues = getCurrentHueArray();
         int currentHueCount = getCurrentHueCount();
-        
+
         for (int i = 0; i < numLeds; i++) {
             // Calculate which color group this LED belongs to, with offset applied per LED
             int effectiveLedPosition = (i + blendOffset) % (numLeds * currentHueCount);
             int groupIndex = (effectiveLedPosition / ledsPerColor) % currentHueCount;
             int nextGroupIndex = (groupIndex + 1) % currentHueCount;
-            
+
             // Get the current and next colors
             uint8_t currentHue = currentHues[groupIndex];
             uint8_t nextHue = currentHues[nextGroupIndex];
-            
+
             // Calculate position within the color group (0 to ledsPerColor-1)
             int ledInGroup = effectiveLedPosition % ledsPerColor;
-            
+
             // Calculate blend fraction (0.0 at start of group, 1.0 at end of group)
             // This creates a smooth transition across the ledsPerColor range
             float blendFraction = (float)ledInGroup / (float)ledsPerColor;
@@ -1108,11 +1150,114 @@ void loopIR() {
 
 // ---- OTA ----
 
+// OTA_URL applies an unsigned binary, so the blast radius has to stop at the LAN:
+// anything that can reach the broker could otherwise point a strip at an internet
+// URL and flash arbitrary firmware onto it. Accept only hosts we can show are
+// local — an mDNS name, an address on this device's own subnet, or a private
+// range for a dev machine on another VLAN. Bare DNS names are refused because
+// resolving them to decide is exactly the lookup an attacker would control.
+bool isLocalNetworkUrl(const String& url) {
+    int schemeEnd = url.indexOf("://");
+    if (schemeEnd < 0) return false;
+
+    int hostStart = schemeEnd + 3;
+    int hostEnd = url.length();
+    for (int i = hostStart; i < (int)url.length(); i++) {
+        char c = url[i];
+        if (c == '/' || c == ':') { hostEnd = i; break; }
+    }
+    String host = url.substring(hostStart, hostEnd);
+    if (host.length() == 0) return false;
+
+    // mDNS names are link-local by definition (e.g. mymac.local)
+    String lower = host;
+    lower.toLowerCase();
+    if (lower.endsWith(".local")) return true;
+
+    IPAddress ip;
+    if (!ip.fromString(host)) return false;   // not an IP literal, and not .local
+
+    // Same subnet as this device is the tightest definition of "local network".
+    // An all-zero mask (no DHCP lease yet) would match every address, so treat
+    // it as unusable rather than as a wildcard that accepts the whole internet.
+    IPAddress self = WiFi.localIP();
+    IPAddress mask = WiFi.subnetMask();
+    if (mask[0] | mask[1] | mask[2] | mask[3]) {
+        bool sameSubnet = true;
+        for (int i = 0; i < 4; i++) {
+            if ((ip[i] & mask[i]) != (self[i] & mask[i])) { sameSubnet = false; break; }
+        }
+        if (sameSubnet) return true;
+    }
+
+    // Otherwise accept the private / loopback / link-local ranges, so a build
+    // server on another VLAN still works without opening this to the internet.
+    if (ip[0] == 10) return true;
+    if (ip[0] == 192 && ip[1] == 168) return true;
+    if (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) return true;
+    if (ip[0] == 127) return true;
+    if (ip[0] == 169 && ip[1] == 254) return true;
+    return false;
+}
+
+// Download and flash whatever is at `url`, unconditionally — the caller decides
+// whether an update is warranted. Shared by the GitHub release path and the
+// operator-issued OTA_URL command so both get the same progress logging and the
+// same controlled reboot. Returns only on failure; success reboots.
+void performOtaFromUrl(const String& url) {
+    ESP_LOGI(TAG, "OTA: downloading firmware from %s", url.c_str());
+
+    // A LAN dev server is plain http, which needs no TLS stack at all. Picking
+    // the client by scheme keeps the ~40 KB cert bundle out of local pushes.
+    bool secure = url.startsWith("https://");
+    WiFiClientSecure secureClient;
+    WiFiClient plainClient;
+    if (secure) {
+        secureClient.setCACertBundle(rootca_crt_bundle_start,
+                                     rootca_crt_bundle_end - rootca_crt_bundle_start);
+    }
+    WiFiClient& client = secure ? (WiFiClient&)secureClient : plainClient;
+
+    // Progress visibility during the ~1 MB write (otherwise a silent 10-30s gap)
+    httpUpdate.onStart([]() {
+        ESP_LOGI(TAG, "OTA: download/flash started");
+    });
+    httpUpdate.onProgress([](int done, int total) {
+        ESP_LOGI(TAG, "OTA: progress %d%% (%d/%d bytes)",
+                 total ? (done * 100 / total) : 0, done, total);
+    });
+    httpUpdate.onError([](int err) {
+        ESP_LOGE(TAG, "OTA: error %d: %s", err, httpUpdate.getLastErrorString().c_str());
+    });
+
+    // Take control of the reboot so we can log + flush UART before resetting
+    httpUpdate.rebootOnUpdate(false);
+    httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    t_httpUpdate_return ret = httpUpdate.update(client, url);
+
+    switch (ret) {
+        case HTTP_UPDATE_OK:
+            ESP_LOGI(TAG, "OTA: update written, rebooting into new firmware now");
+            Serial.flush();      // ensure the line is sent over UART before reset
+            delay(100);
+            ESP.restart();
+            break;
+        case HTTP_UPDATE_NO_UPDATES:
+            ESP_LOGI(TAG, "OTA: server says no update needed");
+            break;
+        case HTTP_UPDATE_FAILED:
+            ESP_LOGE(TAG, "OTA: update failed, error=%d: %s",
+                     httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+            break;
+    }
+}
+
 void checkForOtaUpdate(bool manual) {
     ESP_LOGI(TAG, "OTA: checking for update (manual=%s, current=%s)", manual ? "true" : "false", FIRMWARE_VERSION);
 
     WiFiClientSecure client;
-    client.setCACertBundle(rootca_crt_bundle_start);
+    client.setCACertBundle(rootca_crt_bundle_start,
+                           rootca_crt_bundle_end - rootca_crt_bundle_start);
 
     // Fetch latest release tag from GitHub API
     HTTPClient http;
@@ -1154,39 +1299,7 @@ void checkForOtaUpdate(bool manual) {
 
     ESP_LOGI(TAG, "OTA: update available, downloading firmware...");
 
-    // Progress visibility during the ~1 MB write (otherwise a silent 10-30s gap)
-    httpUpdate.onStart([]() {
-        ESP_LOGI(TAG, "OTA: download/flash started");
-    });
-    httpUpdate.onProgress([](int done, int total) {
-        ESP_LOGI(TAG, "OTA: progress %d%% (%d/%d bytes)",
-                 total ? (done * 100 / total) : 0, done, total);
-    });
-    httpUpdate.onError([](int err) {
-        ESP_LOGE(TAG, "OTA: error %d: %s", err, httpUpdate.getLastErrorString().c_str());
-    });
-
-    // Take control of the reboot so we can log + flush UART before resetting
-    httpUpdate.rebootOnUpdate(false);
-    httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    t_httpUpdate_return ret = httpUpdate.update(client,
-        "https://github.com/brennanMKE/GlowKitchen/releases/latest/download/firmware.bin");
-
-    switch (ret) {
-        case HTTP_UPDATE_OK:
-            ESP_LOGI(TAG, "OTA: update written, rebooting into new firmware now");
-            Serial.flush();      // ensure the line is sent over UART before reset
-            delay(100);
-            ESP.restart();
-            break;
-        case HTTP_UPDATE_NO_UPDATES:
-            ESP_LOGI(TAG, "OTA: server says no update needed");
-            break;
-        case HTTP_UPDATE_FAILED:
-            ESP_LOGE(TAG, "OTA: update failed, error=%d: %s",
-                     httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
-            break;
-    }
+    performOtaFromUrl("https://github.com/brennanMKE/GlowKitchen/releases/latest/download/firmware.bin");
 }
 
 void loopOta() {
@@ -1208,10 +1321,18 @@ void loopOta() {
     static bool startupCheckDone = false;
     if (!startupCheckDone && (millis() - wifiConnectedAt) >= STARTUP_OTA_DELAY_MS) {
         startupCheckDone = true;
-        ESP_LOGI(TAG, "OTA: startup check (%us after WiFi join)", STARTUP_OTA_DELAY_MS / 1000);
-        checkForOtaUpdate(true);
+        if (!otaAutoEnabled) {
+            ESP_LOGI(TAG, "OTA: startup check skipped (auto-update disabled)");
+        } else {
+            ESP_LOGI(TAG, "OTA: startup check (%us after WiFi join)", STARTUP_OTA_DELAY_MS / 1000);
+            checkForOtaUpdate(true);
+        }
         return;
     }
+
+    // A device pinned to a local dev build takes no automatic updates at all;
+    // OTA_UPDATE and OTA_URL still work, so it stays reachable.
+    if (!otaAutoEnabled) return;
 
     // Nightly scheduler — run OTA check once per day at 03:00 local time
     struct tm now;

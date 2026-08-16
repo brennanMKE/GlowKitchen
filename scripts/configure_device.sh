@@ -14,6 +14,7 @@ if [[ $# -lt 2 ]]; then
     echo "  name <name>             Rename device"
     echo "  ir <true|false>         Enable/disable IR receiver"
     echo "  mirror <true|false>     Enable/disable mirror mode"
+    echo "  ota_auto <true|false>   Enable/disable automatic GitHub OTA checks"
     echo ""
     echo "Examples:"
     echo "  $0 kitchen num_leds 240"
@@ -46,6 +47,9 @@ case "$OPTION" in
         ;;
     mirror)
         PAYLOAD="SET_MIRROR:$VALUE"
+        ;;
+    ota_auto)
+        PAYLOAD="OTA_AUTO:$VALUE"
         ;;
     *)
         echo "Error: Unknown option '$OPTION'"
