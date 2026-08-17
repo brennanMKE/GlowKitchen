@@ -23,6 +23,9 @@
 
 # Configuration
 BROKER="homeassistant.local"
+# The release env deliberately, not esp32c3-debug: a verbose build is ~45 KB
+# larger than the 0x140000 OTA slot, so it cannot be pushed over the air at all.
+# Debug builds have to go on over USB (pio run -e esp32c3-debug -t upload).
 BIN=".pio/build/esp32c3/firmware.bin"
 
 if [[ $# -lt 1 ]]; then

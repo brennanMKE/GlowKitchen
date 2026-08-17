@@ -14,7 +14,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.0.4"
+#define FIRMWARE_VERSION "0.0.5"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
@@ -28,6 +28,20 @@ static const char *volatile fwVersionMarkerAnchor;
 // Mozilla CA bundle embedded in the ESP32 SDK (supplied by ESP-IDF mbedTLS component)
 extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
 extern const uint8_t rootca_crt_bundle_end[] asm("_binary_x509_crt_bundle_end");
+
+// Rollover-safe deadline test. `deadline < now` looks correct and usually is,
+// but it survives the millis() wrap only if the loop samples the clock during
+// the interval straddling it. Block across that instant — ensureWifi() waits up
+// to 30s, an OTA check takes seconds — and the deadline is stranded ~49.7 days
+// in the future. That is what froze slowBlend() on four strips (issue #0008).
+//
+// Unsigned subtraction is well-defined on overflow, so the difference is the
+// true elapsed interval across the wrap; reading it as signed answers "has the
+// deadline passed?" correctly for any deadline within ~24.8 days of now. A
+// blocked loop then costs one late frame instead of a permanent stall.
+static inline bool timeReached(unsigned long now, unsigned long deadline) {
+    return (long)(now - deadline) >= 0;
+}
 
 // Forward declarations for OTA (called from onMqttMessage before definition)
 void checkForOtaUpdate(bool manual);
@@ -818,7 +832,7 @@ void ensureMqtt() {
     if (WiFi.status() != WL_CONNECTED) return;
 
     uint32_t now = millis();
-    if (now < mqttRetryAt) return;
+    if (!timeReached(now, mqttRetryAt)) return;
     mqttRetryAt = now + MQTT_RETRY_MS;
 
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
@@ -892,7 +906,7 @@ void flickerLEDs() {
     
     // Update individual LED flickering
     for (int i = 0; i < numLeds; i++) {
-      if (timeouts[i] < now) {
+      if (timeReached(now, timeouts[i])) {
           didChange = true;
           unsigned long delay = random(500, 750);  // Slower, more candle-like flicker
           timeouts[i] = now + delay;
@@ -907,7 +921,7 @@ void flickerLEDs() {
     }
 
     // Auto color change within current theme
-    if (colorChangeEnabled && hueTimeout < now) {
+    if (colorChangeEnabled && timeReached(now, hueTimeout)) {
         hueIndex++;
         hueTimeout = now + 2000;
         if (hueIndex >= currentHueCount) {
@@ -930,7 +944,7 @@ void slowBlend() {
     unsigned long now = millis();
 
     // Update blend animation
-    if (blendTimeout < now) {
+    if (timeReached(now, blendTimeout)) {
         const uint8_t* currentHues = getCurrentHueArray();
         int currentHueCount = getCurrentHueCount();
 
@@ -996,7 +1010,7 @@ void slowBlend() {
         // Slowly rotate the color groups if color change is enabled
         if (colorChangeEnabled) {
             static unsigned long rotateTimeout = 0;
-            if (rotateTimeout < now) {
+            if (timeReached(now, rotateTimeout)) {
                 blendOffset = (blendOffset + 1) % (numLeds * currentHueCount); // Move one LED at a time
                 rotateTimeout = now + 500; // Move every 500ms for slower, more relaxed scrolling
             }
@@ -1033,7 +1047,7 @@ void setupIR() {
 void loopLED() {    
     unsigned long now = millis();
 
-    if (logTimeout < now) {
+    if (timeReached(now, logTimeout)) {
         ESP_LOGI(TAG, "Heartbeat - uptime: %lu ms, theme: %s, hue index: %d, LEDs: %s", 
                  now, THEME_NAMES[currentTheme], hueIndex, ledsEnabled ? "ON" : "OFF");
         logTimeout = now + logInterval;
@@ -1136,7 +1150,7 @@ void loopIR() {
     }
 
     // Periodic heartbeat with IR receiver status
-    if (irLogTimeout < now) {
+    if (timeReached(now, irLogTimeout)) {
         if (IR_DEBUG_MODE) {
             ESP_LOGI(TAG, "IR Heartbeat - uptime: %lu ms, receiver idle: %s, checking for signals...", 
                      now, IrReceiver.isIdle() ? "true" : "false");
