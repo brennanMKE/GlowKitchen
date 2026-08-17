@@ -25,9 +25,75 @@ static const char FW_VERSION_MARKER[] __attribute__((used)) =
     "GLOWKITCHEN_FWVER=" FIRMWARE_VERSION;
 static const char *volatile fwVersionMarkerAnchor;
 
-// Mozilla CA bundle embedded in the ESP32 SDK (supplied by ESP-IDF mbedTLS component)
-extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
-extern const uint8_t rootca_crt_bundle_end[] asm("_binary_x509_crt_bundle_end");
+// Pinned in place of the full Mozilla root store, which cost 69,876 bytes to
+// validate a single vendor (issue #0010). Two roots are required and it is not
+// obvious why: api.github.com and github.com chain to Sectigo, but the release
+// asset itself is served from objects.githubusercontent.com, which chains to
+// ISRG. Pinning only Sectigo makes the version check succeed and the download
+// fail -- the same "looks like no update available" failure shape as #0009,
+// because nothing on the OTA path reports to MQTT.
+//
+// Roots, not leaves or intermediates: leaves rotate every ~90 days on the
+// Let's Encrypt side and intermediates every few years, while these two run to
+// 2045/2046. Both are the self-signed roots taken from a trusted store, not
+// the copies GitHub presents -- the served top-of-chain certs are cross-signed
+// (Sectigo E46 by USERTrust ECC, ISRG Root YR by ISRG Root X1) and so carry
+// different certificate fingerprints for the same key. mbedTLS closes the
+// chain on the trusted root by subject + key, so the cross-signed copies in
+// the presented chain are simply unused.
+//
+// If GitHub migrates to an unpinned root, every GitHub OTA path fails at once,
+// fleet-wide and silently. scripts/release.sh gates on that. The escape hatch
+// is OTA_URL: with an http:// target, which uses a plain WiFiClient and no TLS
+// at all -- which is why that branch below must stay.
+//
+// mbedtls_x509_crt_parse() accepts concatenated PEM blocks, so both roots live
+// in one constant and one setCACert() call.
+static const char GITHUB_ROOT_CAS[] PROGMEM =
+    "-----BEGIN CERTIFICATE-----\n"  // Sectigo Public Server Authentication Root E46, expires 2046-03-21
+    "MIICOjCCAcGgAwIBAgIQQvLM2htpN0RfFf51KBC49DAKBggqhkjOPQQDAzBfMQsw\n"
+    "CQYDVQQGEwJHQjEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMTYwNAYDVQQDEy1T\n"
+    "ZWN0aWdvIFB1YmxpYyBTZXJ2ZXIgQXV0aGVudGljYXRpb24gUm9vdCBFNDYwHhcN\n"
+    "MjEwMzIyMDAwMDAwWhcNNDYwMzIxMjM1OTU5WjBfMQswCQYDVQQGEwJHQjEYMBYG\n"
+    "A1UEChMPU2VjdGlnbyBMaW1pdGVkMTYwNAYDVQQDEy1TZWN0aWdvIFB1YmxpYyBT\n"
+    "ZXJ2ZXIgQXV0aGVudGljYXRpb24gUm9vdCBFNDYwdjAQBgcqhkjOPQIBBgUrgQQA\n"
+    "IgNiAAR2+pmpbiDt+dd34wc7qNs9Xzjoq1WmVk/WSOrsfy2qw7LFeeyZYX8QeccC\n"
+    "WvkEN/U0NSt3zn8gj1KjAIns1aeibVvjS5KToID1AZTc8GgHHs3u/iVStSBDHBv+\n"
+    "6xnOQ6OjQjBAMB0GA1UdDgQWBBTRItpMWfFLXyY4qp3W7usNw/upYTAOBgNVHQ8B\n"
+    "Af8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAwNnADBkAjAn7qRa\n"
+    "qCG76UeXlImldCBteU/IvZNeWBj7LRoAasm4PdCkT0RHlAFWovgzJQxC36oCMB3q\n"
+    "4S6ILuH5px0CMk7yn2xVdOOurvulGu7t0vzCAxHrRVxgED1cf5kDW21USAGKcw==\n"
+    "-----END CERTIFICATE-----\n"
+    "-----BEGIN CERTIFICATE-----\n"  // ISRG Root YR (Let's Encrypt), expires 2045-09-02
+    "MIIFKTCCAxGgAwIBAgIRAOxGNJNgz0sP+KmC2Tqpyj0wDQYJKoZIhvcNAQELBQAw\n"
+    "LjELMAkGA1UEBhMCVVMxDTALBgNVBAoTBElTUkcxEDAOBgNVBAMTB1Jvb3QgWVIw\n"
+    "HhcNMjUwOTAzMDAwMDAwWhcNNDUwOTAyMjM1OTU5WjAuMQswCQYDVQQGEwJVUzEN\n"
+    "MAsGA1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZUjCCAiIwDQYJKoZIhvcNAQEB\n"
+    "BQADggIPADCCAgoCggIBANvGJnN78CTJdWL3+eGfsLN5TrNBJs+VH9hRXqRbwxu9\n"
+    "sGNiB0BD1fcOxbSUQCJIM1xE13Db+5Cw1w0s0EBYsvuIP/6joF0w8cuImbgR1OGg\n"
+    "YbSQ4OpzI+DG8SGuTlcE873OCS+kh3srlo6vl43M5OJg4Aeo1sfHp6kTJDoIiFBN\n"
+    "JAY+OKfX/FUvYKuhjT+no49lmqmupSBI5PkBQiqrEGtWU5uxU/cQWHGu8jSjFBzn\n"
+    "ZqvbNPLMXMLFxCb3WTfrJBXXjqvWG+v4bjzxjjeAtOlU7qarRDvNOyAuQYLln904\n"
+    "M+faKx8hnLCpJ15ZqaEgcNlY+9MMWcC5yvL2A2j3l9+2buggZX+dOE91zYmIdawT\n"
+    "vSZuVvlbRrAlLxIB6pwMBjneXCjYQ8+3BCCjssbSNpZU3hTcBDdhfAlEDlYr6pEa\n"
+    "tnMdmDT5BqnKC92bd0EhM1fbLHioLccLCuievT8ZkPhZrq7Mii7gNXAcUEAR8+lz\n"
+    "Yal+9zTg7C5DALyVOeG/CqfRAMn1KSHCR0NSA6P8tn/mGRlnCct5rtVCLnVySVpU\n"
+    "6H1qGg3DgTOuskf8eahTMiYbI5ezPJmO5ertalskQ1utp74+eDy92PI4ftHKTbq9\n"
+    "IWhH4YZKh3WnJEIt+oQvlYZbY8tpEroKrFB6PFGzrJIDRyts4HqvuH52RFj2zv/B\n"
+    "AgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1Ud\n"
+    "DgQWBBTe51tg0CJtQCh9Pw0B/qS1UrRRlDANBgkqhkiG9w0BAQsFAAOCAgEAWHnf\n"
+    "713Bdkq7t5yN2dNIgQakUb94X9WuyhMEHHkgx4oDpSUlnG0w4g94MoqaEUE31ZjR\n"
+    "LU7L5LD1g9ujFHTQu8AD215AHMVQFbm6j8hQxdXHAzDajFNQnOlDJrLjzIx176oy\n"
+    "AjvUtejZx2NNmdb5fd0WGVGsCdoAJ3N8ozo7ajE8t6vfxStZb4BQ9WYJGHUDrv2N\n"
+    "i5tJF6CNiPnlzs3BUfECRbE4JSk+jvy8+VoGiFE8qsH/j78x2fjgQhAQFV7P7Zxy\n"
+    "dBTZ1wEkNpZNW2qnaK1SKBLa+xf6E06YRIq5uaI+HWH8SY1y5VbRgzq40EKg3yxP\n"
+    "06fz+uYAUIFJoLNfhwRCc3Q6pQVuMX3yAjHAes4gk4moGcLQ5p7HAh39yeylZc1J\n"
+    "41sx/jKwLIkPE6Rr1Nf4pxdsxf9SA4yOEiAkDgq04DVxn8hgYFdUtBCuiuVC2heA\n"
+    "EiqVEa+8QZjuw8Gj0EbHXcRd1nInvGqRS1o9Is7YBdQN57X1AYveGBNNqjICSb7c\n"
+    "awuw1EawTDrs13VUlJVEsbQ0/O/1aaV73mCdOQ8azqL2KTv1Ewu1xbquE2S+kdQU\n"
+    "To9TUwat3wUA6cwXh1EfpS/3fJ0aGah5hdpRyoCLDlsSn8tkrjMfFFX0viC+GxHc\n"
+    "sI1ANRYvqSFC2X1VRZfDg+wD6E21BccmifG4yWc=\n"
+    "-----END CERTIFICATE-----\n";
 
 // Rollover-safe deadline test. `deadline < now` looks correct and usually is,
 // but it survives the millis() wrap only if the loop samples the clock during
@@ -1243,13 +1309,14 @@ void performOtaFromUrl(const String& url) {
     ESP_LOGI(TAG, "OTA: downloading firmware from %s", url.c_str());
 
     // A LAN dev server is plain http, which needs no TLS stack at all. Picking
-    // the client by scheme keeps the ~40 KB cert bundle out of local pushes.
+    // the client by scheme means a local push does no certificate validation --
+    // deliberately, because this is the recovery path if a pinned root above
+    // ever stops matching what GitHub presents.
     bool secure = url.startsWith("https://");
     WiFiClientSecure secureClient;
     WiFiClient plainClient;
     if (secure) {
-        secureClient.setCACertBundle(rootca_crt_bundle_start,
-                                     rootca_crt_bundle_end - rootca_crt_bundle_start);
+        secureClient.setCACert(GITHUB_ROOT_CAS);
     }
     WiFiClient& client = secure ? (WiFiClient&)secureClient : plainClient;
 
@@ -1291,8 +1358,7 @@ void checkForOtaUpdate(bool manual) {
     ESP_LOGI(TAG, "OTA: checking for update (manual=%s, current=%s)", manual ? "true" : "false", FIRMWARE_VERSION);
 
     WiFiClientSecure client;
-    client.setCACertBundle(rootca_crt_bundle_start,
-                           rootca_crt_bundle_end - rootca_crt_bundle_start);
+    client.setCACert(GITHUB_ROOT_CAS);
 
     // Fetch latest release tag from GitHub API
     HTTPClient http;
@@ -1344,7 +1410,10 @@ void loopOta() {
     static bool timeConfigured = false;
     static uint32_t wifiConnectedAt = 0;
     if (!timeConfigured) {
-        configTzTime("CST6CDT,M3.2.0,M11.1.0/2", "pool.ntp.org", "time.nist.gov");
+        // America/Los_Angeles. The DST rule is the same US one either way; only
+        // the base offset differs, which is why the previous CST6CDT ran the
+        // "03:00" check at 01:00 local — see issue #0005.
+        configTzTime("PST8PDT,M3.2.0,M11.1.0/2", "pool.ntp.org", "time.nist.gov");
         timeConfigured = true;
         wifiConnectedAt = millis();
         ESP_LOGI(TAG, "OTA: NTP time sync configured");
@@ -1369,12 +1438,17 @@ void loopOta() {
     // OTA_UPDATE and OTA_URL still work, so it stays reachable.
     if (!otaAutoEnabled) return;
 
-    // Nightly scheduler — run OTA check once per day at 03:00 local time
+    // Daily scheduler. Deliberately mid-afternoon rather than overnight: an
+    // update that goes wrong reboots the strips, and 15:00 is when someone is
+    // awake to notice and recover. There is no canary or rollback yet (#0001,
+    // #0006), so the time of day is the only safety margin there is.
+    static const int OTA_CHECK_HOUR = 15;
+
     struct tm now;
     if (!getLocalTime(&now, 0)) return;            // not synced yet
     if (now.tm_year + 1900 < 2020) return;         // clock not valid
 
-    if (now.tm_hour != 3) return;                  // only in the 03:xx hour
+    if (now.tm_hour != OTA_CHECK_HOUR) return;     // only in that one hour
 
     // Load last-run day from Preferences and skip if already ran today
     preferences.begin("glow_kitchen", true);
