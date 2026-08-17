@@ -646,15 +646,36 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
     } else if (msgUpper.startsWith("SET_DEVICE_NAME:")) {
         String newName = msg.substring(16); // Use original msg to preserve case
         newName.trim();
-        if (newName.length() > 0) {
+        if (newName.length() > 0 && newName != DEVICE_NAME) {
+            // The address this device has been publishing under so far: its old
+            // name, or the hardware id while it was still unnamed.
+            String oldName = getDeviceName();
+
+            // Retained state under the old address would otherwise linger on the
+            // broker forever. Nothing ever publishes there again, so tools that
+            // read retained state keep reporting a device that no longer exists
+            // — which is exactly how a freshly-named board leaves a ghost behind
+            // under its hardware id. A zero-length retained publish deletes it.
+            String oldStateTopic = "lights/" + oldName + "/state";
+            mqtt.publish(oldStateTopic.c_str(), "", true);
+
+            // Stop answering on the previous name too, but never drop the
+            // hardware-id topic: that is the permanent address for reaching a
+            // device whose name has been forgotten or mistyped.
+            if (oldName != getDeviceId()) {
+                String oldCmdTopic = "lights/" + oldName + "/cmd";
+                mqtt.unsubscribe(oldCmdTopic.c_str());
+            }
+
             DEVICE_NAME = newName;
             saveDeviceNameToPreferences();
-            
+
             // Subscribe to the new name topic immediately
             String newTopic = "lights/" + DEVICE_NAME + "/cmd";
             mqtt.subscribe(newTopic.c_str());
-            ESP_LOGI(TAG, "Device name set to: %s and subscribed to %s", DEVICE_NAME.c_str(), newTopic.c_str());
-            
+            ESP_LOGI(TAG, "Device name set to: %s (was %s), subscribed to %s",
+                     DEVICE_NAME.c_str(), oldName.c_str(), newTopic.c_str());
+
             publishState();
         }
     } else if (msgUpper.startsWith("SET_IR_FLAG:")) {
