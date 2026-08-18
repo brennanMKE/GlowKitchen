@@ -11,6 +11,7 @@
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
+#include "time_utils.h"
 
 static const char *TAG = "MAIN";
 
@@ -95,19 +96,33 @@ static const char GITHUB_ROOT_CAS[] PROGMEM =
     "sI1ANRYvqSFC2X1VRZfDg+wD6E21BccmifG4yWc=\n"
     "-----END CERTIFICATE-----\n";
 
-// Rollover-safe deadline test. `deadline < now` looks correct and usually is,
-// but it survives the millis() wrap only if the loop samples the clock during
-// the interval straddling it. Block across that instant — ensureWifi() waits up
-// to 30s, an OTA check takes seconds — and the deadline is stranded ~49.7 days
-// in the future. That is what froze slowBlend() on four strips (issue #0008).
+// timeReached() (rollover-safe deadline test) now lives in time_utils.h,
+// shared with the native test suite in test/test_rollover/ -- see that
+// header for the full rationale, including why it must use uint32_t/int32_t
+// rather than unsigned long/long (issue #0008).
+
+// Clock-offset test harness (issue #0008). The 2^32 ms rollover is 49.7 days
+// away in real time, which cannot be waited out to prove the fix above.
+// Shifting the clock lets a debug build sit within seconds of the wrap on
+// demand: `SET_CLOCK_OFFSET:4294900000` (see onMqttMessage below) puts
+// nowMs() ~67s from wrapping, so the render timers can be watched crossing
+// it directly on the bench.
 //
-// Unsigned subtraction is well-defined on overflow, so the difference is the
-// true elapsed interval across the wrap; reading it as signed answers "has the
-// deadline passed?" correctly for any deadline within ~24.8 days of now. A
-// blocked loop then costs one late frame instead of a permanent stall.
-static inline bool timeReached(unsigned long now, unsigned long deadline) {
-    return (long)(now - deadline) >= 0;
-}
+// ENABLE_CLOCK_OFFSET is defined ONLY by [env:esp32c3-debug] in
+// platformio.ini, never by the release env [env:esp32c3]. That is load-
+// bearing: this build is USB-only and does not have to fit the OTA slot
+// (see platformio.ini header), while the release build is what
+// scripts/release.sh gates on 15,328 spare bytes against the 1,310,720-byte
+// slot (issue #0009 -- v0.0.4 shipped over that limit and was uninstallable
+// fleet-wide). In a release build nowMs() compiles down to a bare millis()
+// call with the offset variable and the MQTT command handler both absent
+// from the binary, so this harness costs the release build nothing.
+#ifdef ENABLE_CLOCK_OFFSET
+static uint32_t clockOffsetMs = 0;
+static inline uint32_t nowMs() { return millis() + clockOffsetMs; }
+#else
+static inline uint32_t nowMs() { return millis(); }
+#endif
 
 // Forward declarations for OTA (called from onMqttMessage before definition)
 void checkForOtaUpdate(bool manual);
@@ -271,6 +286,15 @@ unsigned long blendTimeout = 0;
 unsigned long blendInterval = 100;  // Update blend every 100ms for slower, smoother transitions
 uint8_t blendOffset = 0;           // Offset for rotating the gradient
 uint8_t blendBrightness = MAX_BRIGHTNESS;     // Base brightness for blend mode
+
+// Was a function-static inside slowBlend(). Hoisted to file scope (issue
+// #0008 follow-up) so the ENABLE_CLOCK_OFFSET handler in onMqttMessage() can
+// re-base it alongside blendTimeout when the clock jumps -- a function-static
+// is invisible outside its function and would otherwise strand this timer
+// exactly the way blendTimeout used to. Same lifetime and initial value as
+// before (zero-initialized once, persists across calls), so this is a pure
+// visibility change with no effect on release-build behavior.
+unsigned long rotateTimeout = 0;
 
 // NEC Remote Button Constants (Protocol: NEC, Address: 0x0)
 enum GrayRemoteButton {
@@ -758,6 +782,82 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         saveMirrorToPreferences();
         ESP_LOGI(TAG, "Mirror mode set to: %s", mirrorEnabled ? "true" : "false");
         publishState();
+#ifdef ENABLE_CLOCK_OFFSET
+    } else if (msgUpper.startsWith(SET_CLOCK_OFFSET_PREFIX)) {
+        // Debug-only harness for issue #0008: shift nowMs() near the 2^32 ms
+        // rollover so it can be exercised on the bench in seconds instead of
+        // waited out over 49.7 days. Compiled out entirely in release builds
+        // -- see the ENABLE_CLOCK_OFFSET block above nowMs(). Not part of
+        // publishState()'s schema; it's a bench tool, not device state.
+        //
+        // Round 1 hard-coded this offset as msg.substring(18), which silently
+        // ate the first digit of every documented bench command
+        // (SET_CLOCK_OFFSET:4294900000 parsed as 294900000, landing ~46.3
+        // days from the wrap instead of ~67s) with no error, no log, and no
+        // visible symptom. Round 2 "fixed" it by hand-typing substring(17)
+        // instead -- still just as capable of drifting from the literal the
+        // next time this prefix is edited, papered over by a test that only
+        // pinned strlen("SET_CLOCK_OFFSET:") against a copy of the same
+        // literal declared in the test file (a tautology, not a guarantee).
+        // This round makes the offset structurally impossible to get wrong:
+        // it is derived from SET_CLOCK_OFFSET_PREFIX (shared with the native
+        // test suite via time_utils.h) rather than typed as a number at all.
+        // test_set_clock_offset_payload_parses_at_correct_offset in
+        // test/test_rollover/test_rollover.cpp now pins the arithmetic
+        // (sizeof(prefix) - 1 recovers the full value), not the handler
+        // itself, which native tests cannot link against.
+        String val = msg.substring(sizeof(SET_CLOCK_OFFSET_PREFIX) - 1);
+        val.trim();
+
+        bool validDigits = val.length() > 0;
+        for (unsigned int i = 0; validDigits && i < val.length(); i++) {
+            if (!isDigit(val[i])) validDigits = false;
+        }
+
+        if (!validDigits) {
+            // strtoul() maps garbage to 0, which would silently reset the
+            // offset with no other sign anything went wrong. Bench-tool
+            // leniency (no rejection of a technically-out-of-range number)
+            // is fine, but a non-numeric payload is a typo, not an offset,
+            // so it's rejected and logged loudly rather than applied as 0.
+            ESP_LOGW(TAG, "SET_CLOCK_OFFSET: ignoring non-numeric payload '%s'", val.c_str());
+        } else {
+            clockOffsetMs = (uint32_t)strtoul(val.c_str(), nullptr, 10);
+
+            // Re-base the shifted deadlines onto the new clock. blendTimeout/
+            // rotateTimeout were computed against the OLD nowMs(); jumping
+            // clockOffsetMs by ~4.2949e9ms wraps them, in the signed
+            // arithmetic timeReached() uses, into a deadline that reads as
+            // ~67s in the future -- stranding slowBlend() for that whole
+            // window and hiding the very rollover this harness exists to let
+            // an operator watch happen live (the wrap itself occurs partway
+            // through that frozen window, ~37s in). Resetting both to the
+            // new nowMs() makes them fire on the very next loop iteration
+            // instead of stalling.
+            blendTimeout = nowMs();
+            rotateTimeout = nowMs();
+
+            // The ~67s bench runway documented for this harness (issue
+            // #0008) only holds if the command lands within seconds of
+            // boot. In practice (flash -> reboot -> WiFi -> MQTT connect ->
+            // operator types the command), millis() at command time is
+            // often well past that, and this same
+            // SET_CLOCK_OFFSET:4294900000 then leaves nowMs() ~49.7 days
+            // from the wrap instead of ~67s -- the wrap gets jumped over,
+            // never crossed, and everything downstream (strip animates, log
+            // line looks sane, parsed offset matches what was sent) still
+            // LOOKS like a pass. Logging the actual distance to the wrap
+            // directly, rather than trusting the ~67s assumption, is the
+            // only way an operator running the bench procedure can tell
+            // those two cases apart: this prints ~62000 in the good case
+            // and ~4294900000 in the bad one.
+            uint32_t wrapRunwayMs = 0u - nowMs();
+            ESP_LOGI(TAG, "SET_CLOCK_OFFSET: payload='%s' -> clockOffsetMs=%lu ms "
+                     "(nowMs() now reads %lu, millis() reads %lu, wrap in %lu ms)",
+                     val.c_str(), (unsigned long)clockOffsetMs, (unsigned long)nowMs(),
+                     (unsigned long)millis(), (unsigned long)wrapRunwayMs);
+        }
+#endif
     } else if (msgUpper.startsWith("OTA_URL:")) {
         // Use the original-case msg — URLs are case-sensitive and msgUpper is not.
         String url = msg.substring(8);
@@ -1028,7 +1128,11 @@ void applyMirror() {
 }
 
 void slowBlend() {
-    unsigned long now = millis();
+    // Routed through nowMs() rather than millis() directly: these are the two
+    // timers (blendTimeout, rotateTimeout) that actually froze in issue #0008,
+    // so they're the ones the clock-offset harness needs to move. In a release
+    // build nowMs() is just millis() -- see its definition above.
+    uint32_t now = nowMs();
 
     // Update blend animation
     if (timeReached(now, blendTimeout)) {
@@ -1096,7 +1200,6 @@ void slowBlend() {
         
         // Slowly rotate the color groups if color change is enabled
         if (colorChangeEnabled) {
-            static unsigned long rotateTimeout = 0;
             if (timeReached(now, rotateTimeout)) {
                 blendOffset = (blendOffset + 1) % (numLeds * currentHueCount); // Move one LED at a time
                 rotateTimeout = now + 500; // Move every 500ms for slower, more relaxed scrolling
