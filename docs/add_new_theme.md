@@ -66,14 +66,14 @@ const int NUM_YOUR_THEME_HUES = sizeof(YOUR_THEME_HUES) / sizeof(YOUR_THEME_HUES
 
 #### For Green Theme (flickering effect):
 
-The Green theme uses a specific flickering effect and doesn't need hue arrays. It's handled separately in the `flickerLEDs()` function.
+The Green theme uses a specific flickering effect and doesn't need hue arrays. It's handled separately in the `renderFlicker()` function (renamed from `flickerLEDs()` in issue #0014).
 
 ### Step 4: Update Theme Helper Functions
 
-Update the `getCurrentHueArray()` function to return your theme's hue array:
+Update the `getCurrentColorArray()` function (renamed from `getCurrentHueArray()` in issue #0014) to return your theme's hue array:
 
 ```cpp
-const uint8_t* getCurrentHueArray() {
+const uint8_t* getCurrentColorArray() {
     switch (currentTheme) {
         case THEME_GREEN: return GREEN_HUES;
         case THEME_RAINBOW: return RAINBOW_HUES;
@@ -87,10 +87,10 @@ const uint8_t* getCurrentHueArray() {
 }
 ```
 
-Update `getCurrentHueCount()` function:
+Update `getCurrentColorCount()` function (renamed from `getCurrentHueCount()` in issue #0014):
 
 ```cpp
-int getCurrentHueCount() {
+int getCurrentColorCount() {
     switch (currentTheme) {
         case THEME_GREEN: return NUM_GREEN_HUES;
         case THEME_RAINBOW: return NUM_RAINBOW_HUES;
@@ -141,7 +141,13 @@ const char* getThemeMqttCommand(HueTheme theme) {
 - **Other Themes** (all others) use gradient blending and will smoothly transition between defined hues
 
 The system uses different LED effects based on theme type:
-- Green themes use `flickerLEDs()` function for candle-like flickering
-- Other themes use `slowBlend()` function for gradient color blending
+- Green themes use the `renderFlicker()` function (renamed from `flickerLEDs()` in issue #0014) for candle-like flickering
+- Other themes use the `renderBlend()` function (renamed from `slowBlend()` in issue #0014) for gradient color blending
 
 This ensures proper visual effects for each theme type.
+
+Note: as of issue #0014, theme selection now dispatches through an `EffectMode`
+(`getCurrentEffectMode()`) rather than a direct `currentTheme == THEME_GREEN`
+check, and there is now a seventh `THEME_CUSTOM` slot past the six themes this
+guide covers. The full conceptual rewrite of this document for the
+`(EffectMode, color array)` model lands with issue #0015.

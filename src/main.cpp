@@ -12,6 +12,11 @@
 #include <WiFiClientSecure.h>
 #include <time.h>
 #include "time_utils.h"
+// effects.h relies on CRGB/CHSV/sin8/min/max already being declared -- see
+// the include-order contract at the top of that header. <FastLED.h> above
+// satisfies it. effects.h itself pulls in themes.h (HueTheme, THEME_NAMES[],
+// the six hue arrays) and time_utils.h (already included directly above).
+#include "effects.h"
 
 static const char *TAG = "MAIN";
 
@@ -148,124 +153,16 @@ int ledsPerColor = 25;
 #define DATA_PIN 4
 
 CRGB leds[MAX_LEDS];
-unsigned long timeouts[MAX_LEDS];
+// uint32_t, not unsigned long (issue #0014): identical on the C3, but
+// correct (32-bit) on a 64-bit native host too -- same lesson as
+// src/time_utils.h (issue #0008).
+uint32_t timeouts[MAX_LEDS];
 
-// Theme System
-enum HueTheme {
-    THEME_GREEN = 0,
-    THEME_RAINBOW = 1,
-    THEME_PINK_PONY = 2,
-    THEME_OCEAN_WAVES = 3,
-    THEME_SUNSET = 4,
-    THEME_FOREST = 5,
-    THEME_COUNT = 6
-};
-
-const char* THEME_NAMES[] = {
-    "Green",
-    "Rainbow", 
-    "Pink Pony Club",
-    "Ocean Waves",
-    "Sunset",
-    "Forest"
-};
-
-// Green Theme - Original candle-like greens
-const uint8_t GREEN_HUES[] = {
-  85,  // dark green
-  90,  // darker medium green
-  95,  // medium green
-  100, // medium-light green
-  105, // light green
-  100, // medium-light green (back down)
-  95,  // medium green
-  90   // darker medium green (back to start)
-};
-
-// Rainbow Theme - Full spectrum cycling
-const uint8_t RAINBOW_HUES[] = {
-  0,   // red
-  32,  // orange
-  64,  // yellow
-  96,  // green
-  128, // cyan
-  160, // blue
-  192, // purple
-  224  // magenta
-};
-
-// Pink Pony Club Theme - Pink, magenta, and pony colors
-const uint8_t PINK_PONY_HUES[] = {
-  200, // deep magenta
-  210, // bright magenta
-  220, // hot pink
-  230, // light pink
-  240, // pink-red
-  245, // cotton candy pink
-  250, // bubble gum pink
-  255  // soft pink
-};
-
-// Ocean Waves Theme - Deep blues and teal
- const uint8_t OCEAN_HUES[] = {
-   190, // deep navy
-   185, // dark teal
-   180, // medium teal
-   175, // light teal
-   170, // very light blue
-   165, // pale blue
-   160, // sky blue
-   155  // light blue
- };
-
-// Sunset Theme - Warm oranges and pinks
- const uint8_t SUNSET_HUES[] = {
-   0,   // deep red
-   5,   // dark red-orange
-   10,  // red-orange
-   15,  // orange-red
-   20,  // bright orange
-   25,  // orange-yellow
-   30,  // yellow-orange
-   35,  // bright yellow
-   40,  // warm yellow
-   45,  // soft orange-yellow
-   50,  // warm pink-orange
-   55,  // soft pink
-   60,  // light pink
-   65,  // pale pink
-   70,  // soft purple-pink
-   75,  // deep purple
-   80,  // very dark purple
-   85   // deep indigo
- };
-
-// Forest Theme - Natural greens and earth tones
- const uint8_t FOREST_HUES[] = {
-   70,  // deep forest green
-   75,  // dark forest green
-   80,  // medium forest green
-   85,  // light forest green
-   90,  // moss green
-   95,  // olive green
-   100, // forest blue-green
-   105, // earth brown-green
-   110, // dark moss green
-   115, // forest olive
-   120, // deep woodland green
-   125, // forest twilight green
-   130, // dark forest night green
-   135, // verdant forest green
-   140, // deep forest emerald
-   145  // rich forest jungle green
- };
-
-const int NUM_GREEN_HUES = sizeof(GREEN_HUES) / sizeof(GREEN_HUES[0]);
-const int NUM_RAINBOW_HUES = sizeof(RAINBOW_HUES) / sizeof(RAINBOW_HUES[0]);
-const int NUM_PINK_PONY_HUES = sizeof(PINK_PONY_HUES) / sizeof(PINK_PONY_HUES[0]);
-const int NUM_OCEAN_HUES = sizeof(OCEAN_HUES) / sizeof(OCEAN_HUES[0]);
-const int NUM_SUNSET_HUES = sizeof(SUNSET_HUES) / sizeof(SUNSET_HUES[0]);
-const int NUM_FOREST_HUES = sizeof(FOREST_HUES) / sizeof(FOREST_HUES[0]);
+// Theme System -- HueTheme, THEME_NAMES[] and the six hue arrays moved to
+// src/themes.h (issue #0014) so the native frame-capture test
+// (test/test_effects/) can link against the real tables. EffectMode,
+// BUILTIN_EFFECT_MODE[], CustomEffectConfig and the two renderers moved to
+// src/effects.h, both included above.
 
 // Theme management
 HueTheme currentTheme = THEME_GREEN;
@@ -277,24 +174,35 @@ bool mirrorEnabled = false;  // Mirror mode for bi-directional strips
 // replaced by the released tag within ~15s of its next boot.
 bool otaAutoEnabled = true;
 int hueIndex = 0;
-unsigned long hueTimeout = 0;
 unsigned long logTimeout = 0;
 unsigned long logInterval = 10000;
 
-// slowBlend variables for gradient effects
-unsigned long blendTimeout = 0;
-unsigned long blendInterval = 100;  // Update blend every 100ms for slower, smoother transitions
-uint8_t blendOffset = 0;           // Offset for rotating the gradient
-uint8_t blendBrightness = MAX_BRIGHTNESS;     // Base brightness for blend mode
+// Effect engine state (issue #0014). Zero-initialized, matching the exact
+// prior defaults: blendTimeout/rotateTimeout/hueTimeout/blendOffset all
+// started at 0 before this refactor too (only hueTimeout and timeouts[] were
+// explicitly seeded in setupLED() -- see there). hueIndex stays a separate
+// global rather than living in fx: it has 17 references across preferences,
+// MQTT and logging, and is copied into/out of fx around each render call
+// instead (see loopLED()).
+//
+// blendTimeout and rotateTimeout are the two timers the ENABLE_CLOCK_OFFSET
+// handler in onMqttMessage() re-bases when the debug clock jumps (issue
+// #0008) -- accessed there as fx.blendTimeout / fx.rotateTimeout.
+EffectState fx = {};
 
-// Was a function-static inside slowBlend(). Hoisted to file scope (issue
-// #0008 follow-up) so the ENABLE_CLOCK_OFFSET handler in onMqttMessage() can
-// re-base it alongside blendTimeout when the clock jumps -- a function-static
-// is invisible outside its function and would otherwise strand this timer
-// exactly the way blendTimeout used to. Same lifetime and initial value as
-// before (zero-initialized once, persists across calls), so this is a pure
-// visibility change with no effect on release-build behavior.
-unsigned long rotateTimeout = 0;
+// Nothing populates this in this phase (issue #0014) -- see CustomEffectConfig
+// in src/effects.h. Zero-initialized: mode == EFFECT_BLEND == 0, colorCount
+// == 0, which is exactly what the THEME_CUSTOM boot guard in
+// loadAllPreferences() checks for.
+CustomEffectConfig customEffect = {};
+
+// Two-line wrapper over Arduino random(lo, hi) so the shipped behavior is
+// byte-for-byte what flickerLEDs() did before this refactor -- see the
+// EffectState::rng comment in src/effects.h. The native test injects a
+// fixed-seed LCG instead.
+uint32_t arduinoRandomRange(uint32_t lo, uint32_t hi) {
+    return (uint32_t)random((long)lo, (long)hi);
+}
 
 // NEC Remote Button Constants (Protocol: NEC, Address: 0x0)
 enum GrayRemoteButton {
@@ -362,7 +270,16 @@ const char* getThemeMqttCommand(HueTheme theme) {
     }
 }
 
-const uint8_t* getCurrentHueArray() {
+// Renamed from getCurrentHueArray()/getCurrentHueCount() (issue #0014) to
+// match the spec's naming now that a non-hue (THEME_CUSTOM) source exists.
+// Return type stays `const uint8_t*` -- a HUE array -- for this phase, even
+// though the spec sketches `const CRGB*`: renderBlend() does hue-space
+// arithmetic (shortest path around the 256-hue circle) that has no meaning
+// on RGB triples, so converting the built-ins to CRGB here would change what
+// BLEND renders. Converting the *custom* colors into hue space is issue
+// #0016's problem -- customHues (src/effects.h) is the derived cache that
+// bridges the two representations for THEME_CUSTOM.
+const uint8_t* getCurrentColorArray() {
     switch (currentTheme) {
         case THEME_GREEN: return GREEN_HUES;
         case THEME_RAINBOW: return RAINBOW_HUES;
@@ -370,11 +287,12 @@ const uint8_t* getCurrentHueArray() {
         case THEME_OCEAN_WAVES: return OCEAN_HUES;
         case THEME_SUNSET: return SUNSET_HUES;
         case THEME_FOREST: return FOREST_HUES;
+        case THEME_CUSTOM: return customHues;
         default: return GREEN_HUES;
     }
 }
 
-int getCurrentHueCount() {
+int getCurrentColorCount() {
     switch (currentTheme) {
         case THEME_GREEN: return NUM_GREEN_HUES;
         case THEME_RAINBOW: return NUM_RAINBOW_HUES;
@@ -382,6 +300,7 @@ int getCurrentHueCount() {
         case THEME_OCEAN_WAVES: return NUM_OCEAN_HUES;
         case THEME_SUNSET: return NUM_SUNSET_HUES;
         case THEME_FOREST: return NUM_FOREST_HUES;
+        case THEME_CUSTOM: return customEffect.colorCount;
         default: return NUM_GREEN_HUES;
     }
 }
@@ -470,7 +389,7 @@ void loadAllPreferences() {
     if (ledsPerColor < 1) ledsPerColor = 1;
 
     // Check for development theme override first
-    if (DEV_THEME_OVERRIDE >= 0 && DEV_THEME_OVERRIDE < THEME_COUNT) {
+    if (DEV_THEME_OVERRIDE >= 0 && DEV_THEME_OVERRIDE < CYCLEABLE_THEME_COUNT) {
         currentTheme = (HueTheme)DEV_THEME_OVERRIDE;
         ESP_LOGI(TAG, "*** DEVELOPMENT OVERRIDE ACTIVE ***");
         ESP_LOGI(TAG, "Forcing theme to: %s (index %d)", THEME_NAMES[currentTheme], DEV_THEME_OVERRIDE);
@@ -484,14 +403,26 @@ void loadAllPreferences() {
             ESP_LOGI(TAG, "Invalid saved theme, defaulting to Green");
         }
     }
-    
+
+    // THEME_CUSTOM boot guard (issue #0014). Nothing populates customEffect
+    // in this phase, so this always fires for any path that reaches
+    // THEME_CUSTOM (a forced DEV_THEME_OVERRIDE can't -- it's bounded to
+    // CYCLEABLE_THEME_COUNT above -- but a stray/corrupt NVS byte of 6 could).
+    // Falling back to Green avoids rendering (and dividing/moduloing by) a
+    // zero-length color array in renderBlend()/renderFlicker(), i.e. a
+    // crash loop.
+    if (currentTheme == THEME_CUSTOM && customEffect.colorCount == 0) {
+        currentTheme = THEME_GREEN;
+        ESP_LOGI(TAG, "THEME_CUSTOM with no effect configured, falling back to Green");
+    }
+
     // Load brightness
     unsigned char savedBrightness = preferences.getUChar("brightness", BRIGHTNESS);
     int brightnessToSet = min(MAX_BRIGHTNESS, max(10, (int)savedBrightness));
-    
+
     // Load hue index
     unsigned char savedHueIndex = preferences.getUChar("hue_index", 0);
-    int maxHueIndex = getCurrentHueCount() - 1;
+    int maxHueIndex = getCurrentColorCount() - 1;
     hueIndex = min(maxHueIndex, (int)savedHueIndex);
     
     preferences.end();
@@ -501,7 +432,7 @@ void loadAllPreferences() {
     
     // Log all loaded preferences
     ESP_LOGI(TAG, "=== LOADED PREFERENCES ===");
-    if (DEV_THEME_OVERRIDE >= 0 && DEV_THEME_OVERRIDE < THEME_COUNT) {
+    if (DEV_THEME_OVERRIDE >= 0 && DEV_THEME_OVERRIDE < CYCLEABLE_THEME_COUNT) {
         ESP_LOGI(TAG, "Theme: %s (DEV OVERRIDE)", THEME_NAMES[currentTheme]);
     } else {
         ESP_LOGI(TAG, "Theme: %s", THEME_NAMES[currentTheme]);
@@ -517,13 +448,16 @@ void loadAllPreferences() {
 
 void switchToNextTheme() {
     HueTheme oldTheme = currentTheme;
-    currentTheme = (HueTheme)((currentTheme + 1) % THEME_COUNT);
+    // % CYCLEABLE_THEME_COUNT, not THEME_COUNT (issue #0014): NEXT_THEME must
+    // keep cycling only the original six -- THEME_CUSTOM stays unreachable
+    // by cycling.
+    currentTheme = (HueTheme)((currentTheme + 1) % CYCLEABLE_THEME_COUNT);
     hueIndex = 0; // Reset to first hue in new theme
     saveThemeToPreferences();
     ESP_LOGI(TAG, "Switched from %s to %s theme", THEME_NAMES[oldTheme], THEME_NAMES[currentTheme]);
-    
+
     // Force immediate visual update
-    const uint8_t* currentHues = getCurrentHueArray();
+    const uint8_t* currentHues = getCurrentColorArray();
     uint8_t newHue = currentHues[hueIndex];
     fill_solid(leds, numLeds, CHSV(newHue, 255, 200));
     FastLED.show();
@@ -531,13 +465,14 @@ void switchToNextTheme() {
 
 void switchToPreviousTheme() {
     HueTheme oldTheme = currentTheme;
-    currentTheme = (HueTheme)((currentTheme - 1 + THEME_COUNT) % THEME_COUNT);
+    // Same CYCLEABLE_THEME_COUNT reasoning as switchToNextTheme() above.
+    currentTheme = (HueTheme)((currentTheme - 1 + CYCLEABLE_THEME_COUNT) % CYCLEABLE_THEME_COUNT);
     hueIndex = 0; // Reset to first hue in new theme
     saveThemeToPreferences();
     ESP_LOGI(TAG, "Switched from %s to %s theme", THEME_NAMES[oldTheme], THEME_NAMES[currentTheme]);
-    
+
     // Force immediate visual update
-    const uint8_t* currentHues = getCurrentHueArray();
+    const uint8_t* currentHues = getCurrentColorArray();
     uint8_t newHue = currentHues[hueIndex];
     fill_solid(leds, numLeds, CHSV(newHue, 255, 200));
     FastLED.show();
@@ -584,7 +519,7 @@ void toggleAllLEDs() {
     } else {
         // Turn on all LEDs with current hue from current theme
         ESP_LOGI(TAG, "Turning ON all LEDs");
-        const uint8_t* currentHues = getCurrentHueArray();
+        const uint8_t* currentHues = getCurrentColorArray();
         uint8_t hue = currentHues[hueIndex];
         fill_solid(leds, numLeds, CHSV(hue, 255, 200));
         FastLED.show();
@@ -824,18 +759,24 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         } else {
             clockOffsetMs = (uint32_t)strtoul(val.c_str(), nullptr, 10);
 
-            // Re-base the shifted deadlines onto the new clock. blendTimeout/
-            // rotateTimeout were computed against the OLD nowMs(); jumping
+            // Re-base the shifted deadlines onto the new clock. fx.blendTimeout/
+            // fx.rotateTimeout were computed against the OLD nowMs(); jumping
             // clockOffsetMs by ~4.2949e9ms wraps them, in the signed
             // arithmetic timeReached() uses, into a deadline that reads as
-            // ~67s in the future -- stranding slowBlend() for that whole
+            // ~67s in the future -- stranding the blend render for that whole
             // window and hiding the very rollover this harness exists to let
             // an operator watch happen live (the wrap itself occurs partway
             // through that frozen window, ~37s in). Resetting both to the
             // new nowMs() makes them fire on the very next loop iteration
             // instead of stalling.
-            blendTimeout = nowMs();
-            rotateTimeout = nowMs();
+            //
+            // blendTimeout/rotateTimeout moved into EffectState (issue
+            // #0014) -- this handler is compiled only under
+            // ENABLE_CLOCK_OFFSET ([env:esp32c3-debug]), which is exactly
+            // the by-name rebase the #0014 plan flagged as needing an
+            // update here.
+            fx.blendTimeout = nowMs();
+            fx.rotateTimeout = nowMs();
 
             // The ~67s bench runway documented for this harness (issue
             // #0008) only holds if the command lands within seconds of
@@ -913,7 +854,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
                 if (!ledsEnabled) ledsEnabled = true; // Use direct flag to avoid toggle logic
                 
                 // Force immediate visual update
-                const uint8_t* currentHues = getCurrentHueArray();
+                const uint8_t* currentHues = getCurrentColorArray();
                 uint8_t newHue = currentHues[hueIndex];
                 fill_solid(leds, numLeds, CHSV(newHue, 255, 200));
                 FastLED.show();
@@ -1083,40 +1024,11 @@ GrayRemoteButton identifyGrayRemoteButton(uint8_t address, uint8_t command) {
     }
 }
 
-void flickerLEDs() {
-    bool didChange = false;
-
-    const uint8_t* currentHues = getCurrentHueArray();
-    int currentHueCount = getCurrentHueCount();
-
-    unsigned long now = millis();
-    
-    // Update individual LED flickering
-    for (int i = 0; i < numLeds; i++) {
-      if (timeReached(now, timeouts[i])) {
-          didChange = true;
-          unsigned long delay = random(500, 750);  // Slower, more candle-like flicker
-          timeouts[i] = now + delay;
-          uint8_t flicker = random(120, 255);
-          uint8_t hue = currentHues[hueIndex];
-          leds[i] = CHSV(hue, 255, flicker);
-      }
-    }
-    
-    if (didChange) {
-        FastLED.show();
-    }
-
-    // Auto color change within current theme
-    if (colorChangeEnabled && timeReached(now, hueTimeout)) {
-        hueIndex++;
-        hueTimeout = now + 2000;
-        if (hueIndex >= currentHueCount) {
-            hueIndex = 0;
-        }
-        //saveHueToPreferences();
-    }
-}
+// flickerLEDs()/slowBlend() (issue #0014): the render bodies moved to
+// renderFlicker()/renderBlend() in src/effects.h, so the native frame-diff
+// test (test/test_effects/) can drive them against a stub leds[] buffer.
+// loopLED() below now dispatches on EffectMode via getCurrentEffectMode()
+// instead of `if (currentTheme == THEME_GREEN)`.
 
 // Mirror the first half of the strip onto the second half in reverse (palindrome effect)
 void applyMirror() {
@@ -1127,87 +1039,6 @@ void applyMirror() {
     FastLED.show();
 }
 
-void slowBlend() {
-    // Routed through nowMs() rather than millis() directly: these are the two
-    // timers (blendTimeout, rotateTimeout) that actually froze in issue #0008,
-    // so they're the ones the clock-offset harness needs to move. In a release
-    // build nowMs() is just millis() -- see its definition above.
-    uint32_t now = nowMs();
-
-    // Update blend animation
-    if (timeReached(now, blendTimeout)) {
-        const uint8_t* currentHues = getCurrentHueArray();
-        int currentHueCount = getCurrentHueCount();
-
-        for (int i = 0; i < numLeds; i++) {
-            // Calculate which color group this LED belongs to, with offset applied per LED
-            int effectiveLedPosition = (i + blendOffset) % (numLeds * currentHueCount);
-            int groupIndex = (effectiveLedPosition / ledsPerColor) % currentHueCount;
-            int nextGroupIndex = (groupIndex + 1) % currentHueCount;
-
-            // Get the current and next colors
-            uint8_t currentHue = currentHues[groupIndex];
-            uint8_t nextHue = currentHues[nextGroupIndex];
-
-            // Calculate position within the color group (0 to ledsPerColor-1)
-            int ledInGroup = effectiveLedPosition % ledsPerColor;
-
-            // Calculate blend fraction (0.0 at start of group, 1.0 at end of group)
-            // This creates a smooth transition across the ledsPerColor range
-            float blendFraction = (float)ledInGroup / (float)ledsPerColor;
-            
-            // Interpolate between current and next hue using the SHORTEST path around the hue circle
-            uint8_t blendedHue;
-            
-            // Calculate distances in both directions around the hue circle
-            int forwardDistance = (nextHue - currentHue + 256) % 256;
-            int backwardDistance = (currentHue - nextHue + 256) % 256;
-            int shortestDistance = min(forwardDistance, backwardDistance);
-            
-            // Only blend if colors are close together (within 60 hue units)
-            // This allows Pink Pony Club (55 unit span) to blend smoothly
-            // while preventing blending across larger gaps in themes with wide hue spans
-            const int BLEND_THRESHOLD = 60;
-            
-            if (shortestDistance <= BLEND_THRESHOLD) {
-                // Colors are close - do smooth blending
-                if (forwardDistance <= backwardDistance) {
-                    // Go forward (clockwise around hue circle)
-                    blendedHue = (currentHue + (uint8_t)(forwardDistance * blendFraction)) % 256;
-                } else {
-                    // Go backward (counter-clockwise around hue circle)
-                    blendedHue = (currentHue - (uint8_t)(backwardDistance * blendFraction) + 256) % 256;
-                }
-            } else {
-                // Colors are too far apart - don't blend, just use current color
-                // This keeps themes with large hue differences separate from each other
-                blendedHue = currentHue;
-            }
-            
-            // Add subtle brightness variation for visual interest
-            int baseBrightness = FastLED.getBrightness();
-            uint8_t brightness = min(MAX_BRIGHTNESS, baseBrightness + sin8(now/15 + ledInGroup*40)/12);
-            
-            leds[i] = CHSV(blendedHue, 255, brightness);
-        }
-
-        if (mirrorEnabled) {
-            applyMirror();
-        } else {
-            FastLED.show();
-        }
-        blendTimeout = now + blendInterval;
-        
-        // Slowly rotate the color groups if color change is enabled
-        if (colorChangeEnabled) {
-            if (timeReached(now, rotateTimeout)) {
-                blendOffset = (blendOffset + 1) % (numLeds * currentHueCount); // Move one LED at a time
-                rotateTimeout = now + 500; // Move every 500ms for slower, more relaxed scrolling
-            }
-        }
-    }
-}
-
 void setupLED() {
     // Load all saved preferences (theme, brightness, hue, led config)
     loadAllPreferences();
@@ -1215,14 +1046,21 @@ void setupLED() {
     // Initialize with MAX_LEDS so we can change numLeds at runtime without re-initializing
     FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, MAX_LEDS);
     FastLED.setMaxPowerInVoltsAndMilliamps(5, 500); // volts, mA
-    
+
     ESP_LOGI(TAG, "LED setup complete with %d LEDs (max %d)", numLeds, MAX_LEDS);
 
     unsigned long now = millis();
     for (int i = 0; i < MAX_LEDS; i++) {
       timeouts[i] = now;
     }
-    hueTimeout = now + 2000;
+    // fx.blendTimeout/fx.rotateTimeout/fx.blendOffset are left at their
+    // zero-initialized defaults here, matching the exact pre-#0014 behavior
+    // (blendTimeout/rotateTimeout/blendOffset were never touched in
+    // setupLED() before this refactor either -- only hueTimeout and
+    // timeouts[] were seeded).
+    fx.timeouts = timeouts;
+    fx.hueTimeout = now + 2000;
+    fx.rng = arduinoRandomRange;
     logTimeout = now + logInterval;
 }
 
@@ -1255,11 +1093,50 @@ void loopLED() {
         return; // Exit early, don't do any other LED processing
     }
 
-    // Use different effects based on theme
-    if (currentTheme == THEME_GREEN) {
-        flickerLEDs();  // Candle flicker effect for green theme
-    } else {
-        slowBlend();    // Gradient blend effect for rainbow, ocean, sunset and forest
+    // Dispatch on EffectMode rather than theme (issue #0014). `default ->
+    // renderBlend` is load-bearing: the seven unimplemented modes
+    // (CHASE/WIPE/SCAN/SPARKLE/PULSE/STROBE/COLORLOOP, issue #0015) are
+    // unreachable in this phase -- nothing populates customEffect -- but if
+    // one is ever reached the strip blends rather than going dark or
+    // falling off the end of a jump table.
+    EffectMode mode = getCurrentEffectMode();
+
+    fx.leds = leds;
+    fx.numLeds = numLeds;
+    fx.ledsPerColor = ledsPerColor;
+    fx.colors = getCurrentColorArray();
+    fx.colorCount = getCurrentColorCount();
+    fx.hueIndex = hueIndex;
+    fx.colorChangeEnabled = colorChangeEnabled;
+    fx.brightness = FastLED.getBrightness();
+    fx.maxBrightness = MAX_BRIGHTNESS;
+
+    bool drew;
+    switch (mode) {
+        case EFFECT_FLICKER:
+            // Driven by millis(), not nowMs() -- as before this refactor.
+            // Unifying it with the blend path would strand flicker's
+            // timeouts[] under the SET_CLOCK_OFFSET bench harness, which
+            // only rebases the two blend timers (issue #0008). Out of scope.
+            drew = renderFlicker(fx, millis());
+            break;
+        case EFFECT_BLEND:
+        default:
+            // Routed through nowMs(): blendTimeout/rotateTimeout are the two
+            // timers that actually froze in issue #0008, so they're the ones
+            // the clock-offset harness needs to move. In a release build
+            // nowMs() is just millis() -- see its definition above.
+            drew = renderBlend(fx, nowMs());
+            break;
+    }
+    hueIndex = fx.hueIndex;
+
+    if (drew) {
+        if (mirrorEnabled && mode != EFFECT_FLICKER) {
+            applyMirror();
+        } else {
+            FastLED.show();
+        }
     }
 }
 
