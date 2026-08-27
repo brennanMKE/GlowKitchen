@@ -92,13 +92,42 @@ Behavior notes:
 
 *   **No topic restriction.** Unlike `OTA_URL`/`RESTART`, `SET_EFFECT` is safe on `lights/all/cmd` — it sets the whole installation to one effect, which is a normal thing to want and trivially undone with `CLEAR_EFFECT`.
 *   **A malformed payload changes nothing.** On any parse failure the device stays exactly on whatever theme or effect it was already running — no partial application, no state change, no MQTT reply. **The failure is logged to serial only; silence on the broker is the expected behavior for a rejected command**, not a sign it was dropped in transit.
-*   **The effect survives a reboot** — it is persisted to NVS and reloaded at boot.
-*   **The timeout is stored but not yet acted on.** A `timeout` you send is recorded and clamped as described above, but nothing currently reverts the effect when it expires — that lands in a future update. Use `CLEAR_EFFECT` to end an effect today.
-*   An explicit theme command (any name in "Theme Control" above) cancels an active custom effect rather than leaving its timeout armed to fire later onto a theme you've since moved away from.
-*   `NEXT_THEME`/`PREV_THEME` sent while a custom effect is active land on Rainbow/Forest respectively (Custom's position in the cycle order is arbitrary but harmless).
-*   **Payload size.** The longest legal `SET_EFFECT` command (9-character mode name, 8 colors, all three optional fields) is about 233 bytes including a realistic topic name — under the device's 512-byte MQTT buffer, but a command that's rejected outright by the broker or client library before it ever reaches the device produces the same silence as a parse rejection, so keep payloads to the documented shape.
+*   **The effect survives a reboot** — it is persisted to NVS and reloaded at boot. See "Reboot behavior" below for exactly how a `timeout` is handled across a power cycle.
+*   **The timeout is acted on.** When it elapses, the strip automatically reverts to the theme that was active before `SET_EFFECT` was sent — the same thing `CLEAR_EFFECT` does manually, just on its own schedule. No MQTT command is needed to make it happen.
+*   An explicit theme command (any name in "Theme Control" above) cancels an active custom effect (and its timeout) rather than leaving it armed to fire later onto a theme you've since moved away from.
+*   `NEXT_THEME`/`PREV_THEME` sent while a custom effect is active land on Rainbow/Forest respectively (Custom's position in the cycle order is arbitrary but harmless), and also cancel the timeout.
+*   `OFF`/`TOGGLE` do **not** cancel a timed effect — a timer keeps running (and can still expire and revert) while the strip is off; turning it back `ON` shows whatever the timeout left in place.
+*   **Payload size.** The device's MQTT buffer is 512 bytes. The longest legal `SET_EFFECT` command (9-character mode name, 8 colors, all three optional fields) is well under that with a realistic device/topic name; a command rejected outright by the broker or client library before it ever reaches the device produces the same silence as a parse rejection, so keep payloads to the documented shape.
 
-**`CLEAR_EFFECT`** — reverts immediately to the theme that was active before `SET_EFFECT` was sent (or Green, if that's not determinable). **Explicitly safe on `lights/all/cmd`**, unlike `OTA_URL`/`RESTART` — the worst case is the whole installation returning to its normal theme, which is the recovery action anyway. A no-op if no custom effect is currently active.
+**`CLEAR_EFFECT`** — reverts immediately to the theme that was active before `SET_EFFECT` was sent (or Green, if that's not determinable), regardless of any timeout. **Explicitly safe on `lights/all/cmd`**, unlike `OTA_URL`/`RESTART` — the worst case is the whole installation returning to its normal theme, which is the recovery action anyway. A no-op if no custom effect is currently active.
+
+**`STATUS`** — while a custom effect is active, the reply gains a `custom` object:
+
+```json
+{"theme":"Custom", ..., "custom":{"mode":"COLORLOOP","timeoutRemaining":214}}
+```
+
+The `custom` object is **omitted entirely** whenever `theme` isn't `"Custom"`, so a client that ignores unknown fields sees a byte-identical payload to before this feature existed.
+
+| Field | Meaning |
+| :--- | :--- |
+| `mode` | The active effect's mode name (one of the nine above). |
+| `timeoutRemaining` | Whole seconds left before the effect auto-reverts, rounded **up**. **`-1` means "no timeout" — runs until explicitly changed.** `0`–`28800` is a real remainder; `0` is reachable only in the brief window where a `STATUS` races the revert. `-1` is used instead of `0`, `null`, or omitting the key: `0` is ambiguous with "about to expire", `null`/an absent key both push a type check onto every consumer (this device's own shell scripts included), and `-1` is a single always-present integer that's unambiguously outside the legal range. |
+
+Deliberately **no `colors`** in the `custom` object, even though this may look incomplete: `SET_EFFECT` is the only thing that sets the colors, the sender already knows them, and re-serializing up to eight `#RRGGBB` strings into every retained `STATUS` publish spends flash and wire for a field with no consumer. If this ever needs to change, it fits: the buffer is 512 bytes and the full block (mode + up to 8 colors + timeoutRemaining) is still comfortably under that.
+
+### Reboot behavior (timed effects)
+
+A `SET_EFFECT` with a `timeout` persists an **absolute wall-clock end time** (UTC), not just the remaining duration, specifically so a reboot handles it correctly instead of either losing the effect early or restarting its timer from full duration:
+
+| At boot | Result |
+| :--- | :--- |
+| Wall clock synced, effect not yet expired | **Resumes** with the correct remaining time. |
+| Wall clock synced, effect already expired while powered down | **Reverts immediately** to the prior theme. |
+| Wall clock not yet synced (device just booted, no WiFi yet) | The effect keeps rendering for up to ~2 minutes while the device waits for the clock to sync; if it syncs in time, one of the two rows above applies. If it never syncs within that window, the effect **reverts**. |
+| The effect was originally set while the clock was unsynced (no network at `SET_EFFECT` time) | Not resumable across a reboot at all — reverts on boot, since there is no wall-clock end time to resume from. |
+
+A 30-second effect that was already running when the device rebooted will have expired long before any of this matters. An 8-hour event effect interrupted by a brief power blip resumes with the correct remaining time rather than restarting from 8 hours or being lost entirely.
 
 ### Hardware Configuration
 

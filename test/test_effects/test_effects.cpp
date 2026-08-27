@@ -302,7 +302,7 @@ struct RendererSpec {
 static const RendererSpec RENDERERS[] = {
     {"CHASE",     renderChase,     40, 2},
     {"WIPE",      renderWipe,      40, 2},
-    {"SCAN",      renderScan,      25, 1},
+    {"SCAN",      renderScan,     100, 4},   // quartered for short strips -- keep in sync with renderScan()
     {"SPARKLE",   renderSparkle,   60, 5},
     {"PULSE",     renderPulse,     40, 4},
     {"STROBE",    renderStrobe,   600, 40},
@@ -791,6 +791,93 @@ void test_palette_coverage_all_seven(void) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Issue #0019: rgbToPaletteColor() -- exact integer RGB->HSV conversion.
+// issues/0019.md explicitly asks for a native test and, before this round,
+// none existed even though the function is pure integer math with no
+// FastLED dependency and links anywhere (as here, in the suite that already
+// includes effects.h). Fixture values below were cross-checked against a
+// float HSV reference; every expected (h, s, v) triple is what
+// rgbToPaletteColor() is required to produce, not what it happens to.
+// ---------------------------------------------------------------------
+
+static void assertPaletteColor(uint8_t r, uint8_t g, uint8_t b,
+                                uint8_t expectH, uint8_t expectS, uint8_t expectV,
+                                const char* label) {
+    PaletteColor c = rgbToPaletteColor(r, g, b);
+    char msg[96];
+    snprintf(msg, sizeof(msg), "%s: h", label);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(expectH, c.h, msg);
+    snprintf(msg, sizeof(msg), "%s: s", label);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(expectS, c.s, msg);
+    snprintf(msg, sizeof(msg), "%s: v", label);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(expectV, c.v, msg);
+}
+
+// The three #0019 demo pinks, the whole reason the ticket exists: FastLED's
+// rgb2hsv_approximate() undersaturated all three by ~40%, turning a pink
+// palette into white sparkles on a real strip. These exact h/s pairs are
+// the ticket's own measured "true" values.
+void test_rgb_to_palette_demo_pinks(void) {
+    assertPaletteColor(0xFF, 0x69, 0xB4, 234, 150, 255, "#FF69B4 hot pink");
+    assertPaletteColor(0xFF, 0x14, 0x93, 233, 235, 255, "#FF1493 deep pink");
+    assertPaletteColor(0xFF, 0xB6, 0xC1, 249,  73, 255, "#FFB6C1 light pink");
+}
+
+// Pure primaries -- fully saturated, and the classic 3-way hue split
+// (0, ~85, ~170) that any FastLED-space HSV conversion must land on.
+void test_rgb_to_palette_primaries(void) {
+    assertPaletteColor(255,   0,   0,   0, 255, 255, "pure red");
+    assertPaletteColor(  0, 255,   0,  85, 255, 255, "pure green");
+    assertPaletteColor(  0,   0, 255, 170, 255, 255, "pure blue");
+}
+
+// Achromatic: delta == 0 (grey) or maxc == 0 (black) both take the early
+// return -- hue and saturation are meaningless, so both must be pinned to 0,
+// with v carrying the actual brightness.
+void test_rgb_to_palette_achromatic(void) {
+    assertPaletteColor(255, 255, 255, 0, 0, 255, "white");
+    assertPaletteColor(  0,   0,   0, 0, 0,   0, "black");
+    assertPaletteColor(128, 128, 128, 0, 0, 128, "mid grey");
+}
+
+// The six sector seams (yellow, cyan, magenta), each approached from BOTH
+// adjoining branches of the if/else if/else in rgbToPaletteColor(). At a
+// pure seam color two of the three channels tie for max, and the code's
+// branch order (r, then g, then b) silently picks one; nudging one channel
+// one LSB either side of the tie forces the OTHER branch and must still
+// land within 1 hue unit of the pure seam value, proving the three branches
+// agree at their boundaries rather than jumping.
+void test_rgb_to_palette_sector_seams(void) {
+    // Yellow seam (red/green boundary, hue ~42): pure yellow ties r==g, so
+    // the r-branch (checked first) always wins there; nudge each side to
+    // force the g-branch and confirm continuity.
+    assertPaletteColor(255, 255,   0,  42, 255, 255, "yellow seam (pure, r-branch)");
+    assertPaletteColor(255, 254,   0,  42, 255, 255, "yellow seam, r>g (r-branch)");
+    assertPaletteColor(254, 255,   0,  42, 255, 255, "yellow seam, g>r (g-branch)");
+
+    // Cyan seam (green/blue boundary, hue ~128): pure cyan ties g==b, so the
+    // g-branch (checked before b) always wins there.
+    assertPaletteColor(  0, 255, 255, 128, 255, 255, "cyan seam (pure, g-branch)");
+    assertPaletteColor(  0, 255, 254, 127, 255, 255, "cyan seam, g>b (g-branch)");
+    assertPaletteColor(  0, 254, 255, 128, 255, 255, "cyan seam, b>g (b-branch)");
+
+    // Magenta seam (blue/red boundary, hue ~213): pure magenta ties r==b, so
+    // the r-branch (checked before b) always wins there.
+    assertPaletteColor(255,   0, 255, 213, 255, 255, "magenta seam (pure, r-branch)");
+    assertPaletteColor(254,   0, 255, 213, 255, 255, "magenta seam, b>r (b-branch)");
+    assertPaletteColor(255,   0, 254, 213, 255, 255, "magenta seam, r>b (r-branch)");
+}
+
+// A near-black, low-delta case: small absolute channel values with a small
+// (non-zero) delta, exercising the general chromatic path's integer
+// division (delta*255/maxc for saturation, the sixth-sector arithmetic for
+// hue) at the opposite end of the brightness range from the pinks above,
+// where rounding error is proportionally largest.
+void test_rgb_to_palette_near_black_low_delta(void) {
+    assertPaletteColor(10, 8, 9, 234, 51, 10, "near-black, delta=2");
+}
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
     RUN_TEST(test_theme_green_matches_legacy);
@@ -817,6 +904,13 @@ int main(int argc, char** argv) {
     RUN_TEST(test_monotonic_colorloop_saturation);
     RUN_TEST(test_speed_monotonic_all_seven);
     RUN_TEST(test_palette_coverage_all_seven);
+
+    // Issue #0019: rgbToPaletteColor() exact integer RGB->HSV conversion.
+    RUN_TEST(test_rgb_to_palette_demo_pinks);
+    RUN_TEST(test_rgb_to_palette_primaries);
+    RUN_TEST(test_rgb_to_palette_achromatic);
+    RUN_TEST(test_rgb_to_palette_sector_seams);
+    RUN_TEST(test_rgb_to_palette_near_black_low_delta);
 
     return UNITY_END();
 }

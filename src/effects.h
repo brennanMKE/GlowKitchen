@@ -169,10 +169,48 @@ inline EffectMode getCurrentEffectMode() {
 // main.cpp behind an extern declaration (or declared C++17 `inline`) so both
 // TUs share one definition instead of each getting its own copy.
 static PaletteColor customPalette[MAX_CUSTOM_COLORS];
+// Exact integer RGB->HSV (issue #0019). FastLED's rgb2hsv_approximate() is
+// fast and explicitly inexact: it lost ~40% of the saturation on every input
+// we measured, which turned a three-shade pink palette into white sparkles on
+// a real strip (#FFB6C1 came out s=40 against a true 73, rendering a pale
+// grey). This runs once per SET_EFFECT, never per frame, so the approximation
+// bought nothing that mattered and cost the whole point of #0013's palette
+// widening.
+//
+// Standard max/min formulation in FastLED's 0-255 hue space. No floating
+// point: hue is computed as a 0-1530 sixth-sector value and scaled down, which
+// keeps the division exact enough that the three pinks above land on their
+// true hues. Pure integer math with no FastLED dependency, so the native test
+// suite links the real implementation rather than a copy.
+//
+// This does NOT make the round trip lossless -- assigning a CHSV goes through
+// hsv2rgb_rainbow(), a deliberately non-linear "rainbow" mapping rather than a
+// colorimetric one. It removes the avoidable half of the error.
+inline PaletteColor rgbToPaletteColor(uint8_t r, uint8_t g, uint8_t b) {
+    const uint8_t maxc = (r > g) ? ((r > b) ? r : b) : ((g > b) ? g : b);
+    const uint8_t minc = (r < g) ? ((r < b) ? r : b) : ((g < b) ? g : b);
+    const uint8_t delta = (uint8_t)(maxc - minc);
+
+    const uint8_t v = maxc;
+    if (delta == 0 || maxc == 0) {
+        return { 0, 0, v };   // achromatic: grey/white/black, hue is meaningless
+    }
+    const uint8_t sat = (uint8_t)(((uint32_t)delta * 255) / maxc);
+
+    // Sixth-sector hue in 0..1529, then scaled into FastLED's 0..255 circle.
+    uint16_t h6;
+    if (maxc == r)      h6 = (uint16_t)((  0 + ((int32_t)(g - b) * 255) / delta) + 1530) % 1530;
+    else if (maxc == g) h6 = (uint16_t)(( 510 + ((int32_t)(b - r) * 255) / delta));
+    else                h6 = (uint16_t)((1020 + ((int32_t)(r - g) * 255) / delta));
+
+    const uint8_t hue = (uint8_t)(((uint32_t)h6 * 256) / 1530);
+    return { hue, sat, v };
+}
+
 inline void refreshCustomPalette() {
     for (uint8_t i = 0; i < customEffect.colorCount && i < MAX_CUSTOM_COLORS; i++) {
-        CHSV hsv = rgb2hsv_approximate(customEffect.colors[i]);
-        customPalette[i] = { hsv.hue, hsv.sat, hsv.val };
+        const CRGB& c = customEffect.colors[i];
+        customPalette[i] = rgbToPaletteColor(c.r, c.g, c.b);
     }
 }
 
@@ -425,11 +463,25 @@ inline bool renderChase(EffectState& s, uint32_t now) {
 inline bool renderScan(EffectState& s, uint32_t now) {
     if (s.numLeds <= 0 || s.colorCount <= 0 || !s.colors) return false;
     if (!timeReached(now, s.effectTimeout)) return false;
-    s.effectTimeout = now + speedInterval(s.speed, 25, 1);
+    // Quartered from (25, 1) after bench testing on a 10-LED strip: the
+    // original range assumed ~240 LEDs, where a sweep is 240 steps. On 10
+    // LEDs even speed=0 crossed the strip in ~250 ms, far too fast to read
+    // as a scanner. Long strips get a correspondingly slower sweep -- worth
+    // re-checking at 240 LEDs.
+    s.effectTimeout = now + speedInterval(s.speed, 100, 4);
 
     uint8_t base = (uint8_t)min(s.maxBrightness, s.brightness);
     PaletteColor c = currentPaletteColor(s);
-    int widthCeil = max(1, s.numLeds / 8);
+    // widthCeil floors at 3 so `intensity` is a live control on short strips.
+    // numLeds/8 alone gives ceil==1 for anything under 16 LEDs, which pins
+    // width to 1 for every intensity value -- confirmed on a 10-LED strip via
+    // EFFECT_TRACE, where the scanner showed exactly one lit LED at intensity
+    // 0, 128 and 255 alike, so it had no band and no tail at any setting.
+    // Capped at numLeds/2 so a 1- or 2-LED strip cannot ask for a run wider
+    // than itself. Behaviour at 60 and 240 LEDs is unchanged.
+    int widthCeil = max(3, s.numLeds / 8);
+    int halfStrip = max(1, s.numLeds / 2);
+    if (widthCeil > halfStrip) widthCeil = halfStrip;
     int width = 1 + ((uint32_t)s.intensity * (widthCeil - 1)) / 255;
 
     for (int i = 0; i < s.numLeds; i++) s.leds[i] = CHSV(c.h, c.s, 0);

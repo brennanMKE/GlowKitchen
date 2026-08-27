@@ -21,6 +21,9 @@
 // and the NVS load decision. Include-order contract already satisfied by
 // <FastLED.h> above (see effects.h's own comment).
 #include "effect_parse.h"
+// effect_timeout.h (issue #0017): live expiry, STATUS remaining-seconds,
+// and the reboot resume decision table/clamp. Same include-order contract.
+#include "effect_timeout.h"
 
 static const char *TAG = "MAIN";
 
@@ -133,10 +136,40 @@ static inline uint32_t nowMs() { return millis() + clockOffsetMs; }
 static inline uint32_t nowMs() { return millis(); }
 #endif
 
+// Issue #0017 half B: the project's one notion of "the wall clock is
+// valid", reused rather than reinvented. Mirrors the threshold loopOta()
+// already tests before trusting getLocalTime() -- `now.tm_year + 1900 <
+// 2020` -- but loopOta() is left as-is rather than refactored to call this
+// (it also needs the full struct tm for hour/day-of-year, not just a
+// validity bool; see issues/0017.md section 6.4 for the "optional, weakly
+// preferred" refactor this deliberately skips). time(nullptr) returns UTC
+// epoch regardless of the TZ configTzTime() installs, which is exactly what
+// an absolute end time wants -- no DST arithmetic, no local-time ambiguity
+// across a spring-forward.
+static const uint32_t CLOCK_VALID_EPOCH = 1577836800UL;  // 2020-01-01T00:00:00Z
+static bool clockEpochNow(uint32_t& outEpoch) {
+    time_t t = time(nullptr);
+    if (t < (time_t)CLOCK_VALID_EPOCH) return false;
+    outEpoch = (uint32_t)t;
+    return true;
+}
+
+// Issue #0017 half B: how long a device waits after boot for the wall
+// clock to sync before giving up and reverting a pending resumed effect
+// unconditionally. WiFi association plus an SNTP round trip is seconds in
+// the normal case; 120s is generous enough that a slow AP does not cost a
+// legitimate 8-hour effect, and short enough that a device with no network
+// reaches a definite answer while someone is still standing there. A
+// judgement call (issues/0017.md section 6.3), not a derived number.
+static const uint32_t RESUME_GRACE_MS = 120000;
+
 // Forward declarations for OTA (called from onMqttMessage before definition)
 void checkForOtaUpdate(bool manual);
 void performOtaFromUrl(const String& url);
 bool isLocalNetworkUrl(const String& url);
+// Issue #0017: revertFromCustomEffect() (defined near cancelCustomEffect(),
+// ahead of publishState() in file order) needs this forward declaration.
+void publishState();
 
 /// DEVELOPMENT OVERRIDE
 // Set to a valid theme index (0-5) to force that theme, or -1 to use saved preferences
@@ -202,6 +235,18 @@ EffectState fx = {};
 // == 0, which is exactly what the THEME_CUSTOM boot guard in
 // loadAllPreferences() checks for.
 CustomEffectConfig customEffect = {};
+
+// Issue #0017 half B: wall-clock end time for reboot survival, stored under
+// its own NVS key ("fx_end") rather than a CustomEffectConfig field, so
+// this stays purely additive to #0016's layout and needs no
+// SETTINGS_VERSION bump (issues/0017.md section 6.2). effectResumePending/
+// effectResumeGraceUntil are pure in-RAM bookkeeping for the deferred boot
+// decision in loopEffectTimeout() -- never persisted, since a second reboot
+// must re-derive from the unchanged effectEndEpoch, not from progressively
+// adjusted in-RAM state.
+static uint32_t effectEndEpoch = 0;        // UTC seconds; 0 = no timeout / not resumable
+static bool     effectResumePending = false;
+static uint32_t effectResumeGraceUntil = 0;
 
 // Two-line wrapper over Arduino random(lo, hi) so the shipped behavior is
 // byte-for-byte what flickerLEDs() did before this refactor -- see the
@@ -386,24 +431,69 @@ void saveCustomEffectToPreferences() {
     preferences.begin("glow_kitchen", false);
     preferences.putUChar("fx_ver", SETTINGS_VERSION);
     preferences.putBytes("fx_cfg", &customEffect, sizeof(customEffect));
+    // Issue #0017 half B: always written in the same session as fx_ver/
+    // fx_cfg, so the two can never diverge -- fx_end == 0 is itself a
+    // legal, meaningful value ("no timeout"/"not resumable"), never stale.
+    preferences.putUInt("fx_end", effectEndEpoch);
     preferences.end();
-    ESP_LOGI(TAG, "Custom effect saved: mode=%s colors=%u speed=%u intensity=%u timeoutMs=%lu",
+    ESP_LOGI(TAG, "Custom effect saved: mode=%s colors=%u speed=%u intensity=%u timeoutMs=%lu fx_end=%lu",
              EFFECT_MODE_NAMES[customEffect.mode], customEffect.colorCount,
              customEffect.speed, customEffect.intensity,
-             (unsigned long)customEffect.timeoutMs);
+             (unsigned long)customEffect.timeoutMs, (unsigned long)effectEndEpoch);
 }
 
-// Issue #0016 section 6.3: the cancel path, called from every non-
-// CLEAR_EFFECT exit from a custom effect (explicit theme dispatch,
-// switchToNextTheme(), switchToPreviousTheme()) so an abandoned custom
-// effect never leaves a stale timeout armed. The caller sets currentTheme
-// itself -- this only tears down the timeout bookkeeping. No-op (and no
-// needless NVS write) if there was nothing to cancel.
+// Issue #0016 section 6.3 (widened by issue #0017): the cancel path, called
+// from every non-CLEAR_EFFECT exit from a custom effect (explicit theme
+// dispatch, switchToNextTheme(), switchToPreviousTheme()) so an abandoned
+// custom effect never leaves a stale timeout armed. The caller sets
+// currentTheme itself -- this only tears down the timeout bookkeeping.
+// No-op (and no needless NVS write) if there was nothing to cancel.
+//
+// The guard grew two terms in issue #0017: without them, a device sitting
+// in the "resume pending" state with timeoutMs == 0 (an untimed effect that
+// still has a stale fx_end/effectResumePending from before) would return
+// early and never clear fx_end -- a landmine for the next reboot.
 void cancelCustomEffect() {
-    if (customEffect.timeoutMs == 0 && customEffect.activatedAt == 0) return;
-    customEffect.timeoutMs = 0;
+    if (customEffect.timeoutMs == 0 && customEffect.activatedAt == 0
+        && effectEndEpoch == 0 && !effectResumePending) return;
+    customEffect.timeoutMs  = 0;
     customEffect.activatedAt = 0;
+    effectEndEpoch      = 0;      // issue #0017
+    effectResumePending = false;  // issue #0017
     saveCustomEffectToPreferences();
+}
+
+// Issue #0017 section 2.3: the shared revert path. CLEAR_EFFECT and the
+// live timeout expiry (loopEffectTimeout()) both funnel through this
+// instead of duplicating the revert logic, so they cannot drift into two
+// different notions of "revert" (e.g. one clearing the wall-clock end time,
+// the other forgetting to, and resurrecting a ghost effect on the next
+// reboot).
+void revertFromCustomEffect() {
+    if (currentTheme != THEME_CUSTOM) return;          // idempotent
+    HueTheme t = customEffect.revertTheme;
+    if (t >= CYCLEABLE_THEME_COUNT) t = THEME_GREEN;   // never revert into THEME_CUSTOM
+    currentTheme = t;
+    hueIndex = 0;
+    // Keep mode/colors/colorCount -- colorCount == 0 keeps meaning "never
+    // configured" for the THEME_CUSTOM boot guard, not the ambiguous
+    // "cleared" (issue #0016 section 6.2).
+    customEffect.timeoutMs  = 0;
+    customEffect.activatedAt = 0;
+    effectEndEpoch      = 0;      // issue #0017 half B
+    effectResumePending = false;  // issue #0017 half B
+    saveThemeToPreferences();
+    saveCustomEffectToPreferences();  // also writes fx_end = 0
+
+    // Force immediate visual update, mirroring the theme-string handler.
+    // hueIndex = 0 before reading the palette matters -- the custom effect
+    // may have had 1 color and the revert target 8, or vice versa;
+    // renderFlicker() indexes colors[hueIndex] unguarded.
+    const PaletteColor* currentColors = getCurrentColorArray();
+    PaletteColor newColor = currentColors[hueIndex];
+    fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
+    FastLED.show();
+    publishState();
 }
 
 void loadAllPreferences() {
@@ -445,11 +535,17 @@ void loadAllPreferences() {
     size_t fxLen = preferences.getBytesLength("fx_cfg");
     uint8_t fxBuf[sizeof(CustomEffectConfig)];
     size_t fxGot = (fxLen == sizeof(fxBuf)) ? preferences.getBytes("fx_cfg", fxBuf, sizeof(fxBuf)) : 0;
-    if (!applyLoadedCustomEffect(fxVer, fxGot, fxBuf, customEffect)) {
+    bool fxAccepted = applyLoadedCustomEffect(fxVer, fxGot, fxBuf, customEffect);
+    if (!fxAccepted) {
         if (fxVer != 0 || fxLen != 0) {
             ESP_LOGE(TAG, "custom effect: stored v%u/%uB rejected, reset to defaults", fxVer, (unsigned)fxLen);
         }
     }
+    // Issue #0017 half B: gated on the config having been accepted -- if
+    // applyLoadedCustomEffect() rejected and reset the config, a leftover
+    // end time is meaningless; treat it as 0. No need to erase the key --
+    // the next save rewrites it (section 6.2).
+    effectEndEpoch = fxAccepted ? preferences.getUInt("fx_end", 0) : 0;
     refreshCustomPalette();
 
     // Check for development theme override first
@@ -478,6 +574,31 @@ void loadAllPreferences() {
     if (currentTheme == THEME_CUSTOM && customEffect.colorCount == 0) {
         currentTheme = THEME_GREEN;
         ESP_LOGI(TAG, "THEME_CUSTOM with no effect configured, falling back to Green");
+    }
+
+    // Issue #0017 half B: arm the deferred resume decision for a timed
+    // custom effect that survived the boot guard above. This cannot be a
+    // plain if/else here -- the wall clock is never synced at this point in
+    // boot (configTzTime() runs inside loopOta(), only after WiFi joins;
+    // issues/0017.md section 6.1) -- so the actual decision (resume /
+    // revert-expired / revert-no-clock) is deferred to loopEffectTimeout(),
+    // which resolves it once the clock syncs or a grace window elapses.
+    //
+    // customEffect.activatedAt is already 0 here (applyLoadedCustomEffect()
+    // forces it). customEffect.timeoutMs is deliberately left INTACT rather
+    // than zeroed -- it is both the "was this actually a timed effect"
+    // signal tested below and the original duration resumeTimeoutMs()
+    // clamps against on resume. This is safe because loopEffectTimeout()
+    // unconditionally returns early while effectResumePending is true, so
+    // effectTimeoutExpired() never evaluates this half-seeded state (the
+    // alternative considered was zeroing timeoutMs and stashing the
+    // original value separately -- issues/0017.md section 6.3 flags that
+    // approach as easy to get wrong by simply forgetting the stash).
+    if (currentTheme == THEME_CUSTOM && customEffect.timeoutMs > 0) {
+        effectResumePending = true;
+        effectResumeGraceUntil = nowMs() + RESUME_GRACE_MS;
+        ESP_LOGI(TAG, "Custom effect timeout pending resume decision (grace %lu ms)",
+                 (unsigned long)RESUME_GRACE_MS);
     }
 
     // Load brightness
@@ -612,7 +733,34 @@ void publishState() {
     payload += "\"mirrorEnabled\":" + String(mirrorEnabled ? "true" : "false") + ",";
     payload += "\"irEnabled\":" + String(irEnabled ? "true" : "false") + ",";
     payload += "\"otaAuto\":" + String(otaAutoEnabled ? "true" : "false") + ",";
-    payload += "\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"}";
+    payload += "\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"";
+
+    // Issue #0017 section 4.3: emitted ONLY when a custom effect is active,
+    // so old clients see byte-identical STATUS payloads otherwise.
+    // Deliberately omits "colors" even though the parent spec's example
+    // includes them -- SET_EFFECT is the only thing that sets them, the
+    // sender already knows them, and re-serializing up to eight RGB
+    // triples into every retained state publish spends flash and wire for
+    // no consumer; see docs/mqtt_commands.md. timeoutRemaining is computed
+    // from the millis()-domain clock (nowMs()), same as the live expiry
+    // check -- see effect_timeout.h's comment on why that's right even
+    // once half B's wall-clock epoch exists.
+    if (currentTheme == THEME_CUSTOM) {
+        // Issue #0017 half B: while a boot-time resume decision is still
+        // pending, activatedAt is 0 but timeoutMs still holds the full
+        // original duration (see the boot-arm comment in
+        // loadAllPreferences()) -- feeding those straight into
+        // effectTimeoutRemainingSeconds() would read as "elapsed since
+        // boot" and report a bogus near-zero remainder during the grace
+        // window. Report the original duration instead until the decision
+        // resolves one way or the other.
+        int32_t remaining = effectResumePending
+            ? (int32_t)(customEffect.timeoutMs / 1000UL)
+            : effectTimeoutRemainingSeconds(customEffect.timeoutMs, customEffect.activatedAt, nowMs());
+        payload += ",\"custom\":{\"mode\":\"" + String(EFFECT_MODE_NAMES[customEffect.mode]) +
+                   "\",\"timeoutRemaining\":" + String(remaining) + "}";
+    }
+    payload += "}";
 
     // Issue #0016: PubSubClient's publish() drops an oversized packet and
     // returns false, silently, with no other symptom -- the default
@@ -866,6 +1014,23 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
             // rebase as blendTimeout/rotateTimeout above, or a chase/strobe
             // in flight strands here exactly like #0008's round-2 defect.
             fx.effectTimeout = nowMs();
+            // issue #0017: customEffect.activatedAt is another millis()-
+            // domain deadline base and needs the identical rebase, or a
+            // live custom-effect timeout strands exactly like the two
+            // above -- this is #0008's round-2 defect, verbatim, applied to
+            // a field #0016 added after that defect was fixed. Rebasing
+            // restarts the countdown from full duration, which is correct
+            // and intentional here: an 8-hour timeout restarting when the
+            // bench clock jumps is a property of this debug-only bench
+            // harness, not a bug -- ENABLE_CLOCK_OFFSET never compiles into
+            // the release build (see the harness comment above nowMs()).
+            customEffect.activatedAt = nowMs();
+            // issue #0017 half B: a pending resume decision's grace window
+            // is also millis()-domain and needs the same treatment, or the
+            // jump can make the grace deadline appear to have already
+            // passed (or be absurdly far away), corrupting the boot resume
+            // decision on this bench build.
+            if (effectResumePending) effectResumeGraceUntil = nowMs() + RESUME_GRACE_MS;
 
             // The ~67s bench runway documented for this harness (issue
             // #0008) only holds if the command lands within seconds of
@@ -951,6 +1116,24 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
             hueIndex = 0; // the previous theme may have had 8 hues, the new effect fewer
             refreshCustomPalette();
             if (!ledsEnabled) ledsEnabled = true; // mirrors the theme-string handler below
+
+            // Issue #0017 half B: seed the wall-clock end time so a reboot
+            // can resolve this effect correctly. Set while the clock is
+            // unsynced -> effectEndEpoch stays 0, which is deliberately
+            // NOT resumable: without a wall clock there is no honest
+            // remainder to compute, so it reverts on boot instead (falls
+            // out of effectResumeDecision()'s REVERT_NO_END row for free).
+            // A fresh SET_EFFECT also self-cancels any pending boot-resume
+            // decision -- this is a brand new effect, not a continuation of
+            // whatever was pending.
+            effectResumePending = false;
+            uint32_t epochNow = 0;
+            effectEndEpoch = (customEffect.timeoutMs && clockEpochNow(epochNow))
+                             ? epochNow + customEffect.timeoutMs / 1000UL : 0;
+            if (customEffect.timeoutMs && effectEndEpoch == 0) {
+                ESP_LOGI(TAG, "SET_EFFECT: clock not synced, timeout will not survive a reboot");
+            }
+
             saveThemeToPreferences();
             saveCustomEffectToPreferences();
 
@@ -975,29 +1158,13 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         // THEME_CUSTOM. Deliberately NO /all/ check, unlike OTA_URL/RESTART:
         // the worst case is the whole installation returning to its normal
         // theme, which is the recovery action anyway (issue #0013).
+        //
+        // Issue #0017: shares revertFromCustomEffect() with the live
+        // timeout expiry (loopEffectTimeout()) rather than duplicating the
+        // revert logic -- see that function's comment for why.
         if (currentTheme == THEME_CUSTOM) {
-            HueTheme t = customEffect.revertTheme;
-            if (t >= CYCLEABLE_THEME_COUNT) t = THEME_GREEN; // never revert into THEME_CUSTOM
-            currentTheme = t;
-            hueIndex = 0;
-            // Keep mode/colors/colorCount rather than resetting the whole
-            // struct -- colorCount == 0 keeps meaning "never configured"
-            // for the THEME_CUSTOM boot guard, not the ambiguous "cleared".
-            // Zeroing timeoutMs/activatedAt is what matters: a stale
-            // timeout left behind here is a live landmine the moment
-            // issue #0017 lands.
-            customEffect.timeoutMs = 0;
-            customEffect.activatedAt = 0;
-            saveThemeToPreferences();
-            saveCustomEffectToPreferences();
-
-            const PaletteColor* currentColors = getCurrentColorArray();
-            PaletteColor newColor = currentColors[hueIndex];
-            fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
-            FastLED.show();
-
+            revertFromCustomEffect();
             ESP_LOGI(TAG, "CLEAR_EFFECT: reverted to %s", THEME_NAMES[currentTheme]);
-            publishState();
         }
     } else {
         HueTheme newTheme = currentTheme;
@@ -1235,43 +1402,20 @@ void applyMirror() {
     FastLED.show();
 }
 
-#ifdef DEV_FORCE_EFFECT
-#ifndef DEV_FORCE_EFFECT_MODE
-#define DEV_FORCE_EFFECT_MODE EFFECT_CHASE
-#endif
-#endif
-
 void setupLED() {
     // Load all saved preferences (theme, brightness, hue, led config)
     loadAllPreferences();
 
-#ifdef DEV_FORCE_EFFECT
-    // Bench-only hook (issue #0015 section 11): nothing can SET_EFFECT over
-    // MQTT until issue #0016 lands, so this forces THEME_CUSTOM with a
-    // chosen EffectMode at boot -- the only way to drive the seven new
-    // renderers on real hardware before then. Runs AFTER loadAllPreferences()
-    // deliberately: that call's THEME_CUSTOM boot guard (which falls back to
-    // THEME_GREEN whenever customEffect.colorCount == 0) has already run by
-    // this point, so populating customEffect here isn't undone by it.
-    //
-    // -DDEV_FORCE_EFFECT_MODE=EFFECT_STROBE (or any other EFFECT_* value)
-    // on the pio command line picks the mode without editing this file;
-    // default is EFFECT_CHASE. Same precedent as ENABLE_CLOCK_OFFSET:
-    // compiled ONLY under [env:esp32c3-debug]'s DEV_FORCE_EFFECT flag, never
-    // in a release build -- confirmed by the release firmware.bin size being
-    // unchanged by this flag's addition.
-    customEffect.mode = DEV_FORCE_EFFECT_MODE;
-    customEffect.colors[0] = CRGB(255, 0, 0);
-    customEffect.colors[1] = CRGB(0, 255, 0);
-    customEffect.colors[2] = CRGB(0, 0, 255);
-    customEffect.colorCount = 3;
-    customEffect.speed = 128;
-    customEffect.intensity = 128;
-    refreshCustomPalette();
-    currentTheme = THEME_CUSTOM;
-    ESP_LOGI(TAG, "*** DEV_FORCE_EFFECT ACTIVE: forcing THEME_CUSTOM, mode=%d ***",
-             (int)customEffect.mode);
-#endif
+    // Issue #0017: the DEV_FORCE_EFFECT bench hook (issue #0015 section 11)
+    // used to run here, forcing THEME_CUSTOM with a hardcoded CHASE effect
+    // at every boot. It existed only because nothing could set THEME_CUSTOM
+    // over MQTT until issue #0016 landed SET_EFFECT, which supersedes it.
+    // Removed here because it was actively harmful: it ran AFTER
+    // loadAllPreferences() and unconditionally overwrote whatever effect
+    // had just been restored from NVS, so every esp32c3-debug build
+    // restored the WRONG effect after a power cycle -- confirmed on
+    // hardware during issue #0016. See platformio.ini for the matching
+    // -DDEV_FORCE_EFFECT removal.
 
     // Initialize with MAX_LEDS so we can change numLeds at runtime without re-initializing
     FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, MAX_LEDS);
@@ -1303,7 +1447,56 @@ void setupIR() {
     ESP_LOGI(TAG, "IR receiver ready: %s", IrReceiver.isIdle() ? "true" : "false");
 }
 
-void loopLED() {    
+// Issue #0017: acts on the timeout issue #0016 parses, clamps and persists.
+// Called from loop(), BEFORE loopLED() (so a revert takes visual effect on
+// the same iteration it fires, not one frame later) and NOT from inside
+// loopLED() (which returns early when !ledsEnabled -- issue #0016 section
+// 6.3 deliberately makes OFF/TOGGLE NOT cancel a timed effect, so a timed
+// effect must still be able to expire while the strip is off, or turning
+// the lights off parks a live timeout indefinitely and it fires late
+// whenever they come back on). Running from loop() also means this keeps
+// working with WiFi down and MQTT disconnected -- loopOta() would not,
+// since it returns early on WiFi.status() != WL_CONNECTED.
+void loopEffectTimeout() {
+    // Half B: resolve the deferred boot-time resume decision first, before
+    // any live-expiry check. See the boot-arm comment in
+    // loadAllPreferences() for why this can't just run once at boot.
+    if (effectResumePending) {
+        uint32_t epoch;
+        if (clockEpochNow(epoch)) {
+            effectResumePending = false;
+            if (effectEndEpoch == 0 || epoch >= effectEndEpoch) {
+                ESP_LOGI(TAG, "Custom effect expired while powered down; reverting");
+                revertFromCustomEffect();
+            } else {
+                customEffect.timeoutMs   = resumeTimeoutMs(epoch, effectEndEpoch);
+                customEffect.activatedAt = nowMs();
+                ESP_LOGI(TAG, "Custom effect resumed, %lu s remaining",
+                         (unsigned long)(customEffect.timeoutMs / 1000UL));
+            }
+        } else if (timeReached(nowMs(), effectResumeGraceUntil)) {
+            effectResumePending = false;
+            ESP_LOGI(TAG, "Clock never synced within grace window; reverting custom effect");
+            revertFromCustomEffect();
+        }
+        // The resume decision writes no NVS -- it adjusts the in-RAM
+        // activatedAt/timeoutMs only. A second reboot must re-derive from
+        // the unchanged fx_end, not from progressively adjusted in-RAM
+        // state, and this also avoids a flash write on every boot
+        // (issues/0017.md section 6.3). Unconditional return: the live
+        // expiry check below must never run against this half-seeded state
+        // in the same iteration a resume decision resolves.
+        return;
+    }
+
+    if (!effectTimeoutExpired(currentTheme == THEME_CUSTOM, customEffect.timeoutMs,
+                               customEffect.activatedAt, nowMs())) return;
+    ESP_LOGI(TAG, "Custom effect timed out after %lu s, reverting to %s",
+             (unsigned long)(customEffect.timeoutMs / 1000UL), THEME_NAMES[customEffect.revertTheme]);
+    revertFromCustomEffect();
+}
+
+void loopLED() {
     unsigned long now = millis();
 
     if (timeReached(now, logTimeout)) {
@@ -1399,6 +1592,40 @@ void loopLED() {
             break;
     }
     hueIndex = fx.hueIndex;
+
+#ifdef EFFECT_TRACE
+    // Render telemetry for bench verification (debug builds only).
+    //
+    // Exists because eyeballing a strip is a poor feedback loop: over one
+    // session it produced three wrong diagnoses -- a "frozen" SPARKLE that was
+    // really stale firmware, a "stuck" SCAN that was a frame caught during a
+    // flash, and a colour conversion that reviewed clean numerically and
+    // rendered white on actual LEDs. A log line carrying the renderer's own
+    // state plus the pixels it just wrote makes all three checkable from a
+    // serial capture instead of a person's eyes.
+    //
+    // Rate-limited rather than per-frame: at ~30 fps an unthrottled trace
+    // floods the link and changes the timing it is meant to measure.
+    // TRACE_LEDS caps the dump so a 240-LED strip cannot overrun the line.
+    {
+        static uint32_t traceDeadline = 0;
+        const uint32_t traceNow = millis();
+        if (drew && timeReached(traceNow, traceDeadline)) {
+            traceDeadline = traceNow + 250;
+            const int TRACE_LEDS = numLeds < 10 ? numLeds : 10;
+            char px[128];
+            int n = 0;
+            for (int i = 0; i < TRACE_LEDS && n < (int)sizeof(px) - 12; i++) {
+                n += snprintf(px + n, sizeof(px) - n, "%02x%02x%02x ",
+                              leds[i].r, leds[i].g, leds[i].b);
+            }
+            ESP_LOGI(TAG, "[TRACE] mode=%d phase=%u dir=%d sub=%u leds=%d speed=%u int=%u bright=%u px=%s",
+                     (int)mode, (unsigned)fx.effectPhase, (int)fx.effectDir,
+                     (unsigned)fx.effectSub, numLeds, (unsigned)fx.speed,
+                     (unsigned)fx.intensity, FastLED.getBrightness(), px);
+        }
+    }
+#endif
 
     if (drew) {
         if (mirrorEnabled && mode != EFFECT_FLICKER) {
@@ -1734,6 +1961,7 @@ void loop() {
     ensureWifi();
     ensureMqtt();
 
+    loopEffectTimeout();  // issue #0017 -- see the placement rationale above the function
     loopLED();
     loopIR();
     loopOta();
