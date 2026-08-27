@@ -31,15 +31,18 @@ All commands should be sent as plain string payloads.
 
 | Payload | Description |
 | :--- | :--- |
-| `NEXT_THEME` | Cycles to the next available theme. |
-| `PREV_THEME` | Cycles to the previous theme. |
+| `NEXT_THEME` | Cycles to the next available theme (the six below; skips Custom). |
+| `PREV_THEME` | Cycles to the previous theme (the six below; skips Custom). |
 | `GREEN` | Switches immediately to the Green theme (candle flicker). |
 | `RAINBOW` | Switches immediately to the Rainbow theme (gradient blend). |
-| `PINK_PONY` | Switches immediately to the Pink Pony Club theme (pink/magenta). |
-| `HALLOWEEN` | Switches immediately to the Halloween theme (orange/purple). |
-| `CHRISTMAS` | Switches immediately to the Christmas theme (red/green). |
+| `PINK_PONY` | Switches immediately to the Pink Pony Club theme (pink/magenta). Alias: `PINK_PONY_CLUB`. |
+| `OCEAN_WAVES` | Switches immediately to the Ocean Waves theme (blues/teals). Alias: `OCEAN`. |
+| `SUNSET` | Switches immediately to the Sunset theme (warm oranges/pinks). |
+| `FOREST` | Switches immediately to the Forest theme (greens/earth tones). |
 
-*Note: The system also supports `SCENE_1` (Green) and `SCENE_2` (Rainbow) for backward compatibility.*
+*Note: The system also supports `SCENE_1` (Green) and `SCENE_2` (Rainbow) for backward compatibility. Every theme name above also accepts a `THEME_` prefix (e.g. `THEME_GREEN`).*
+
+*A seventh theme, Custom, exists but is not in this cycle — it holds whatever effect `SET_EFFECT` last configured (see "Custom Effects" below) and is only reachable through `SET_EFFECT`, never through `NEXT_THEME`/`PREV_THEME` or a theme name. Sending any theme name above while a custom effect is active cancels the effect and switches normally.*
 
 ### Brightness Control
 
@@ -55,6 +58,47 @@ All commands should be sent as plain string payloads.
 | :--- | :--- |
 | `COLOR_CHANGE_ON` | Enables automatic color cycling/rotation within the theme. |
 | `COLOR_CHANGE_OFF` | Freezes the colors in their current state. |
+
+### Custom Effects
+
+Ad hoc effects with arbitrary colors, independent of the six built-in themes. All prior commands above (and below) are **unaffected** by this feature — `ON`/`OFF`/`TOGGLE`/`NEXT_THEME`/`PREV_THEME`/the six theme names/`SET_BRIGHTNESS`/`SET_DEVICE_NAME`/`SET_IR_FLAG`/`STATUS`/the OTA family all behave exactly as before.
+
+| Payload | Description |
+| :--- | :--- |
+| `SET_EFFECT:{...}` | Applies a custom effect with the JSON object described below. |
+| `CLEAR_EFFECT` | Reverts immediately to the theme that was active before the effect was applied. |
+
+**`SET_EFFECT:{...}`** — the payload after the prefix is a JSON object with these fields:
+
+| Field | Required | Type | Description |
+| :--- | :--- | :--- | :--- |
+| `mode` | yes | string | One of the nine mode names below (case-insensitive). A bare number is **not** accepted. |
+| `colors` | yes | array of strings | 1–8 colors as `#RRGGBB` or `RRGGBB` hex strings (the leading `#` is optional; shorthand `#RGB` is not supported). |
+| `speed` | no | integer 0–255 | Animation speed. Default **128**. An out-of-range value (including a quoted number, e.g. `"128"`) is rejected. |
+| `intensity` | no | integer 0–255 | Effect-specific intensity (run width, density, duty cycle, etc. — see the mode). Default **128**. Same rejection rule as `speed`. |
+| `timeout` | no | integer, seconds | How long the effect runs before reverting on its own. Default **0** (until explicitly changed). **A value over 28800 (8 hours) is accepted and reduced to 8 hours — it is a clamp, not a rejection.** |
+
+The nine mode names: `BLEND`, `FLICKER`, `CHASE`, `WIPE`, `SCAN`, `SPARKLE`, `PULSE`, `STROBE`, `COLORLOOP`.
+
+Examples:
+
+```
+lights/kitchen/cmd  →  SET_EFFECT:{"mode":"CHASE","colors":["#FF6600"]}
+lights/kitchen/cmd  →  SET_EFFECT:{"mode":"COLORLOOP","colors":["#FF0000","#00FF00","#0000FF","#FFFF00","#FF00FF","#00FFFF","#FFFFFF","#FFA500"],"speed":180,"intensity":200}
+lights/kitchen/cmd  →  SET_EFFECT:{"mode":"STROBE","colors":["#FFFFFF"],"timeout":30}
+```
+
+Behavior notes:
+
+*   **No topic restriction.** Unlike `OTA_URL`/`RESTART`, `SET_EFFECT` is safe on `lights/all/cmd` — it sets the whole installation to one effect, which is a normal thing to want and trivially undone with `CLEAR_EFFECT`.
+*   **A malformed payload changes nothing.** On any parse failure the device stays exactly on whatever theme or effect it was already running — no partial application, no state change, no MQTT reply. **The failure is logged to serial only; silence on the broker is the expected behavior for a rejected command**, not a sign it was dropped in transit.
+*   **The effect survives a reboot** — it is persisted to NVS and reloaded at boot.
+*   **The timeout is stored but not yet acted on.** A `timeout` you send is recorded and clamped as described above, but nothing currently reverts the effect when it expires — that lands in a future update. Use `CLEAR_EFFECT` to end an effect today.
+*   An explicit theme command (any name in "Theme Control" above) cancels an active custom effect rather than leaving its timeout armed to fire later onto a theme you've since moved away from.
+*   `NEXT_THEME`/`PREV_THEME` sent while a custom effect is active land on Rainbow/Forest respectively (Custom's position in the cycle order is arbitrary but harmless).
+*   **Payload size.** The longest legal `SET_EFFECT` command (9-character mode name, 8 colors, all three optional fields) is about 233 bytes including a realistic topic name — under the device's 512-byte MQTT buffer, but a command that's rejected outright by the broker or client library before it ever reaches the device produces the same silence as a parse rejection, so keep payloads to the documented shape.
+
+**`CLEAR_EFFECT`** — reverts immediately to the theme that was active before `SET_EFFECT` was sent (or Green, if that's not determinable). **Explicitly safe on `lights/all/cmd`**, unlike `OTA_URL`/`RESTART` — the worst case is the whole installation returning to its normal theme, which is the recovery action anyway. A no-op if no custom effect is currently active.
 
 ### Hardware Configuration
 
@@ -108,5 +152,5 @@ The following scripts are available in the `scripts/` folder to simplify common 
 ### 4. Set Specific Theme
 `./scripts/set_theme.sh [location] [THEME]`
 *   **Location**: `kitchen`, `tv`, `desk`, or `all`.
-*   **THEME**: `GREEN`, `RAINBOW`, `PINK_PONY`, `HALLOWEEN`, or `CHRISTMAS`.
+*   **THEME**: `GREEN`, `RAINBOW`, `PINK_PONY`, `OCEAN_WAVES`, `SUNSET`, or `FOREST`.
 *   Uses the **Retain** flag to keep devices in sync.

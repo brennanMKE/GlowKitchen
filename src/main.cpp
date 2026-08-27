@@ -17,6 +17,10 @@
 // satisfies it. effects.h itself pulls in themes.h (HueTheme, THEME_NAMES[],
 // the six hue arrays) and time_utils.h (already included directly above).
 #include "effects.h"
+// effect_parse.h (issue #0016): the hand-rolled SET_EFFECT payload parser
+// and the NVS load decision. Include-order contract already satisfied by
+// <FastLED.h> above (see effects.h's own comment).
+#include "effect_parse.h"
 
 static const char *TAG = "MAIN";
 
@@ -370,6 +374,38 @@ void saveOtaAutoToPreferences() {
     ESP_LOGI(TAG, "OTA auto-update saved: %s", otaAutoEnabled ? "true" : "false");
 }
 
+// Issue #0016: the custom effect's NVS record, modelled on the seven helpers
+// above -- a per-key Preferences session, not a monolithic "saveSettings()"
+// (this codebase has no such function; see effect_parse.h's header comment).
+// Both keys are <=15 characters (the NVS key limit). Write the version byte
+// BEFORE the blob in the same session: if the blob write somehow fails, the
+// version byte is already correct, which is the safe direction -- a correct
+// version with a stale/short blob is caught by the length check on the next
+// load (applyLoadedCustomEffect(), src/effect_parse.h).
+void saveCustomEffectToPreferences() {
+    preferences.begin("glow_kitchen", false);
+    preferences.putUChar("fx_ver", SETTINGS_VERSION);
+    preferences.putBytes("fx_cfg", &customEffect, sizeof(customEffect));
+    preferences.end();
+    ESP_LOGI(TAG, "Custom effect saved: mode=%s colors=%u speed=%u intensity=%u timeoutMs=%lu",
+             EFFECT_MODE_NAMES[customEffect.mode], customEffect.colorCount,
+             customEffect.speed, customEffect.intensity,
+             (unsigned long)customEffect.timeoutMs);
+}
+
+// Issue #0016 section 6.3: the cancel path, called from every non-
+// CLEAR_EFFECT exit from a custom effect (explicit theme dispatch,
+// switchToNextTheme(), switchToPreviousTheme()) so an abandoned custom
+// effect never leaves a stale timeout armed. The caller sets currentTheme
+// itself -- this only tears down the timeout bookkeeping. No-op (and no
+// needless NVS write) if there was nothing to cancel.
+void cancelCustomEffect() {
+    if (customEffect.timeoutMs == 0 && customEffect.activatedAt == 0) return;
+    customEffect.timeoutMs = 0;
+    customEffect.activatedAt = 0;
+    saveCustomEffectToPreferences();
+}
+
 void loadAllPreferences() {
     ESP_LOGI(TAG, "loadAllPreferences()");
     preferences.begin("glow_kitchen", true);
@@ -394,6 +430,27 @@ void loadAllPreferences() {
     if (numLeds > MAX_LEDS) numLeds = MAX_LEDS;
     if (numLeds < 1) numLeds = 1;
     if (ledsPerColor < 1) ledsPerColor = 1;
+
+    // Issue #0016: load the custom effect BEFORE the theme-resolution block
+    // below -- the THEME_CUSTOM boot guard a few lines down tests
+    // customEffect.colorCount == 0, so it would read garbage if this ran
+    // after it. applyLoadedCustomEffect() (src/effect_parse.h) is the pure
+    // decision function; this is just the four-line Preferences wrapper
+    // around it. A missing "fx_ver"/"fx_cfg" (pre-#0016 firmware, or a
+    // device that has never set an effect) reads back version 0 / length 0,
+    // which applyLoadedCustomEffect() treats as "never written" rather than
+    // "corrupt" -- no log on that path, since it would otherwise fire on
+    // every boot of every device on the very first upgrade.
+    uint8_t fxVer = preferences.getUChar("fx_ver", 0);
+    size_t fxLen = preferences.getBytesLength("fx_cfg");
+    uint8_t fxBuf[sizeof(CustomEffectConfig)];
+    size_t fxGot = (fxLen == sizeof(fxBuf)) ? preferences.getBytes("fx_cfg", fxBuf, sizeof(fxBuf)) : 0;
+    if (!applyLoadedCustomEffect(fxVer, fxGot, fxBuf, customEffect)) {
+        if (fxVer != 0 || fxLen != 0) {
+            ESP_LOGE(TAG, "custom effect: stored v%u/%uB rejected, reset to defaults", fxVer, (unsigned)fxLen);
+        }
+    }
+    refreshCustomPalette();
 
     // Check for development theme override first
     if (DEV_THEME_OVERRIDE >= 0 && DEV_THEME_OVERRIDE < CYCLEABLE_THEME_COUNT) {
@@ -455,6 +512,12 @@ void loadAllPreferences() {
 
 void switchToNextTheme() {
     HueTheme oldTheme = currentTheme;
+    // Issue #0016: NEXT_THEME (MQTT and the IR remote, via
+    // handleGrayRemoteButton()) must tear down an active custom effect's
+    // timeout, or an effect abandoned by cycling away from it would still be
+    // sitting there armed to revert later, onto whatever theme cycling has
+    // since landed on.
+    cancelCustomEffect();
     // % CYCLEABLE_THEME_COUNT, not THEME_COUNT (issue #0014): NEXT_THEME must
     // keep cycling only the original six -- THEME_CUSTOM stays unreachable
     // by cycling.
@@ -472,6 +535,8 @@ void switchToNextTheme() {
 
 void switchToPreviousTheme() {
     HueTheme oldTheme = currentTheme;
+    // Issue #0016: same reasoning as switchToNextTheme() above.
+    cancelCustomEffect();
     // Same CYCLEABLE_THEME_COUNT reasoning as switchToNextTheme() above.
     currentTheme = (HueTheme)((currentTheme - 1 + CYCLEABLE_THEME_COUNT) % CYCLEABLE_THEME_COUNT);
     hueIndex = 0; // Reset to first hue in new theme
@@ -549,7 +614,19 @@ void publishState() {
     payload += "\"otaAuto\":" + String(otaAutoEnabled ? "true" : "false") + ",";
     payload += "\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"}";
 
-    mqtt.publish(topic.c_str(), payload.c_str(), true);
+    // Issue #0016: PubSubClient's publish() drops an oversized packet and
+    // returns false, silently, with no other symptom -- the default
+    // MQTT_MAX_PACKET_SIZE is 256 bytes for the WHOLE packet (topic +
+    // payload + overhead), and this payload has been growing (SET_EFFECT
+    // added a "theme":"Custom" possibility, and every future field here
+    // narrows the same margin). ESP_LOGE, not LOGW/LOGI, for the same
+    // release-visibility reason as SET_EFFECT's rejection log above.
+    if (!mqtt.publish(topic.c_str(), payload.c_str(), true)) {
+        ESP_LOGE(TAG, "publishState: publish to %s FAILED (payload %u bytes) -- "
+                 "likely exceeds the MQTT buffer; see mqtt.setBufferSize() in ensureMqtt()",
+                 topic.c_str(), (unsigned)payload.length());
+        return;
+    }
     ESP_LOGI(TAG, "Published state to %s", topic.c_str());
 }
 
@@ -834,6 +911,94 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         saveOtaAutoToPreferences();
         ESP_LOGI(TAG, "OTA auto-update set to: %s", otaAutoEnabled ? "true" : "false");
         publishState();
+    } else if (msgUpper.startsWith(SET_EFFECT_PREFIX)) {
+        // Issue #0016. No topic restriction -- unlike OTA_URL/RESTART, an
+        // ad hoc effect on lights/all/cmd is a normal thing to want and
+        // trivially undone with CLEAR_EFFECT.
+        //
+        // The parser writes into a scratch struct, never the live
+        // customEffect, so a rejected parse structurally cannot leave a
+        // half-applied config -- see effect_parse.h's header comment. The
+        // prefix offset is derived (sizeof(...) - 1), never hand-typed --
+        // the exact defect that cost issue #0008 two rounds. Original-case
+        // msg is parsed and logged; only the startsWith() match above uses
+        // msgUpper, so a normalization step the native tests don't exercise
+        // never reaches the device-only path.
+        CustomEffectConfig parsed;
+        const char* body = msg.c_str() + (sizeof(SET_EFFECT_PREFIX) - 1);
+        EffectParseResult r = parseEffectPayload(body, parsed);
+        if (r != EFFECT_PARSE_OK) {
+            // ESP_LOGE, not LOGW/LOGI -- [env:esp32c3] builds at
+            // CORE_DEBUG_LEVEL=1, where only ESP_LOGE survives. A rejection
+            // logged at a lower level would be invisible on every device
+            // that ever runs this in the field. Truncated to 160 chars: a
+            // full legal payload is ~166 bytes, so a rejected one is bounded
+            // and readable without a pathological payload flooding the log.
+            // Nothing else happens: no publishState(), no NVS write, no
+            // currentTheme change -- the device stays exactly where it was.
+            ESP_LOGE(TAG, "SET_EFFECT rejected (%s): '%.160s'", effectParseResultName(r), msg.c_str());
+        } else {
+            // The prevRevert ternary is the whole point of issue #0016's
+            // cancel-path item 4: two back-to-back SET_EFFECTs must not make
+            // the second one's revert target the first effect. Captured
+            // BEFORE `customEffect = parsed` overwrites revertTheme (with
+            // resetCustomEffect()'s THEME_GREEN via parseEffectPayload()).
+            HueTheme prevRevert = customEffect.revertTheme;
+            customEffect = parsed;
+            customEffect.revertTheme = (currentTheme != THEME_CUSTOM) ? currentTheme : prevRevert;
+            customEffect.activatedAt = nowMs(); // nowMs(), not millis() -- see the ENABLE_CLOCK_OFFSET harness above
+            currentTheme = THEME_CUSTOM;
+            hueIndex = 0; // the previous theme may have had 8 hues, the new effect fewer
+            refreshCustomPalette();
+            if (!ledsEnabled) ledsEnabled = true; // mirrors the theme-string handler below
+            saveThemeToPreferences();
+            saveCustomEffectToPreferences();
+
+            // Force immediate visual update -- parity with the theme-switch
+            // paths (switchToNextTheme(), the theme-string dispatch below).
+            const PaletteColor* currentColors = getCurrentColorArray();
+            PaletteColor newColor = currentColors[hueIndex];
+            fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
+            FastLED.show();
+
+            ESP_LOGI(TAG, "SET_EFFECT applied: mode=%s colors=%u speed=%u intensity=%u timeoutSec=%lu",
+                     EFFECT_MODE_NAMES[customEffect.mode], customEffect.colorCount,
+                     customEffect.speed, customEffect.intensity,
+                     (unsigned long)(customEffect.timeoutMs / 1000UL));
+            publishState();
+        }
+    } else if (msgUpper == "CLEAR_EFFECT") {
+        // Issue #0016. Exact match, not a prefix -- placed here (rather
+        // than the trailing exact-match block below) purely because it's
+        // adjacent to SET_EFFECT; it behaves like the other exact-match
+        // commands otherwise. Idempotent no-op when not currently on
+        // THEME_CUSTOM. Deliberately NO /all/ check, unlike OTA_URL/RESTART:
+        // the worst case is the whole installation returning to its normal
+        // theme, which is the recovery action anyway (issue #0013).
+        if (currentTheme == THEME_CUSTOM) {
+            HueTheme t = customEffect.revertTheme;
+            if (t >= CYCLEABLE_THEME_COUNT) t = THEME_GREEN; // never revert into THEME_CUSTOM
+            currentTheme = t;
+            hueIndex = 0;
+            // Keep mode/colors/colorCount rather than resetting the whole
+            // struct -- colorCount == 0 keeps meaning "never configured"
+            // for the THEME_CUSTOM boot guard, not the ambiguous "cleared".
+            // Zeroing timeoutMs/activatedAt is what matters: a stale
+            // timeout left behind here is a live landmine the moment
+            // issue #0017 lands.
+            customEffect.timeoutMs = 0;
+            customEffect.activatedAt = 0;
+            saveThemeToPreferences();
+            saveCustomEffectToPreferences();
+
+            const PaletteColor* currentColors = getCurrentColorArray();
+            PaletteColor newColor = currentColors[hueIndex];
+            fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
+            FastLED.show();
+
+            ESP_LOGI(TAG, "CLEAR_EFFECT: reverted to %s", THEME_NAMES[currentTheme]);
+            publishState();
+        }
     } else {
         HueTheme newTheme = currentTheme;
         bool themeIdentified = false;
@@ -860,6 +1025,15 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
 
         if (themeIdentified) {
             if (newTheme != currentTheme || !ledsEnabled) {
+                // Issue #0016: an explicit theme command must cancel an
+                // active custom effect's timeout, not leave it queued to
+                // revert (to a theme the user has since moved away from)
+                // later. newTheme != THEME_CUSTOM always holds here (no
+                // theme string maps to THEME_CUSTOM), so this `if` is the
+                // only thing gating the visual change already below --
+                // what was missing before this ticket was only the timeout
+                // teardown.
+                if (currentTheme == THEME_CUSTOM) cancelCustomEffect();
                 currentTheme = newTheme;
                 hueIndex = 0;
                 saveThemeToPreferences();
@@ -977,6 +1151,16 @@ void ensureMqtt() {
 
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
     mqtt.setCallback(onMqttMessage);
+    // Issue #0016: PubSubClient defaults to a 256-byte MQTT_MAX_PACKET_SIZE
+    // for the WHOLE packet, and silently drops (never invokes the callback,
+    // never logs) anything over that -- an 8-color SET_EFFECT with a
+    // realistic topic name is ~189 of those 256 bytes already (see
+    // effect_parse.h's wire-size test), and STATUS/SET_DEVICE_NAME payloads
+    // grow over time too. setBufferSize() must be called every time this
+    // function actually (re)connects -- it does not persist across a
+    // PubSubClient reconnect the way setServer()/setCallback() are already
+    // re-applied here on each attempt.
+    mqtt.setBufferSize(512);
 
     String clientId = "esp32c3-glowkitchen-" + String(getDeviceName()) + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
 

@@ -42,6 +42,20 @@ enum EffectMode {
     EFFECT_COLORLOOP = 8
 };
 
+// Issue #0016: the wire/name form of EffectMode, for SET_EFFECT's "mode"
+// field and NVS-mismatch log lines. `static const char* const`, not a bare
+// `const char* NAMES[]` -- src/themes.h's THEME_NAMES[] had exactly this bug
+// flagged in #0014's round-2 review (external linkage -> duplicate-symbol
+// link error the moment a second TU in one test binary includes this
+// header). `static` gives internal linkage.
+static const char* const EFFECT_MODE_NAMES[] = {
+    "BLEND", "FLICKER", "CHASE", "WIPE", "SCAN",
+    "SPARKLE", "PULSE", "STROBE", "COLORLOOP"
+};
+static_assert(sizeof(EFFECT_MODE_NAMES) / sizeof(EFFECT_MODE_NAMES[0])
+              == EFFECT_COLORLOOP + 1,
+              "one name per EffectMode");
+
 #define MAX_CUSTOM_COLORS 8
 
 // Ad hoc effect configuration. Nothing populates this in this phase --
@@ -65,6 +79,46 @@ struct CustomEffectConfig {
     uint32_t   activatedAt;
     HueTheme   revertTheme;
 };
+
+// Issue #0016: NVS layout version for the CustomEffectConfig blob. Nothing
+// has ever written a version byte before this ticket -- reading a missing
+// "fx_ver" key returns 0 (Preferences' default), which is why 0 is reserved
+// to mean "never written" rather than "version zero of this layout". 2
+// follows the spec's suggested value; 1 is left meaning "the pre-#0016
+// layout" even though that layout never actually persisted anything.
+static const uint8_t SETTINGS_VERSION = 2;
+
+// Explicit field assignment, not memset -- so the "zero-initialize on
+// mismatch" behavior the ticket cares about is a named, native-testable
+// function rather than an incidental property of a memset call site in
+// main.cpp. speed/intensity reset to 128 (the default everywhere else in
+// this tree), not 0 -- a zero-initialized config would render as a frozen
+// animation, which is a confusing failure mode for a device that fell back
+// after a version mismatch.
+inline void resetCustomEffect(CustomEffectConfig& c) {
+    c.mode = EFFECT_BLEND;
+    for (uint8_t i = 0; i < MAX_CUSTOM_COLORS; i++) c.colors[i] = CRGB(0, 0, 0);
+    c.colorCount = 0;
+    c.speed = 128;
+    c.intensity = 128;
+    c.timeoutMs = 0;
+    c.activatedAt = 0;
+    c.revertTheme = THEME_GREEN;
+}
+
+// The validity gate applyLoadedCustomEffect() (src/effect_parse.h) runs
+// against a stored blob before trusting it. revertTheme < CYCLEABLE_THEME_COUNT
+// is the load-bearing check here: a stored revertTheme == THEME_CUSTOM would
+// be an infinite self-revert the moment CLEAR_EFFECT or the #0017 timeout
+// runs, so it is rejected outright rather than merely bounds-checked against
+// THEME_COUNT.
+inline bool customEffectIsValid(const CustomEffectConfig& c) {
+    if (c.colorCount < 1 || c.colorCount > MAX_CUSTOM_COLORS) return false;
+    if (c.mode > EFFECT_COLORLOOP) return false;
+    if (c.revertTheme >= CYCLEABLE_THEME_COUNT) return false;
+    if (c.timeoutMs > 28800000UL) return false;
+    return true;
+}
 
 // Maps each of the 6 cycleable themes to the EffectMode that renders it.
 // Green -> FLICKER (candle effect); everything else -> BLEND (gradient
