@@ -157,6 +157,9 @@ CRGB leds[MAX_LEDS];
 // correct (32-bit) on a 64-bit native host too -- same lesson as
 // src/time_utils.h (issue #0008).
 uint32_t timeouts[MAX_LEDS];
+// SPARKLE's per-LED brightness array (issue #0015) -- wired to fx.sparkleVal
+// in setupLED(). ~500 bytes SRAM at MAX_LEDS.
+uint8_t sparkleValues[MAX_LEDS];
 
 // Theme System -- HueTheme, THEME_NAMES[] and the six hue arrays moved to
 // src/themes.h (issue #0014) so the native frame-capture test
@@ -279,7 +282,11 @@ const char* getThemeMqttCommand(HueTheme theme) {
 // BLEND renders. Converting the *custom* colors into hue space is issue
 // #0016's problem -- customHues (src/effects.h) is the derived cache that
 // bridges the two representations for THEME_CUSTOM.
-const uint8_t* getCurrentColorArray() {
+// Return type widened from `const uint8_t*` to `const PaletteColor*` (issue
+// #0015): the six built-in arrays in src/themes.h are now {hue, 255, 200}
+// triples rather than bare hue bytes, and customPalette (src/effects.h) is
+// the derived-cache analog of the old customHues.
+const PaletteColor* getCurrentColorArray() {
     switch (currentTheme) {
         case THEME_GREEN: return GREEN_HUES;
         case THEME_RAINBOW: return RAINBOW_HUES;
@@ -287,7 +294,7 @@ const uint8_t* getCurrentColorArray() {
         case THEME_OCEAN_WAVES: return OCEAN_HUES;
         case THEME_SUNSET: return SUNSET_HUES;
         case THEME_FOREST: return FOREST_HUES;
-        case THEME_CUSTOM: return customHues;
+        case THEME_CUSTOM: return customPalette;
         default: return GREEN_HUES;
     }
 }
@@ -457,9 +464,9 @@ void switchToNextTheme() {
     ESP_LOGI(TAG, "Switched from %s to %s theme", THEME_NAMES[oldTheme], THEME_NAMES[currentTheme]);
 
     // Force immediate visual update
-    const uint8_t* currentHues = getCurrentColorArray();
-    uint8_t newHue = currentHues[hueIndex];
-    fill_solid(leds, numLeds, CHSV(newHue, 255, 200));
+    const PaletteColor* currentColors = getCurrentColorArray();
+    PaletteColor newColor = currentColors[hueIndex];
+    fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
     FastLED.show();
 }
 
@@ -472,9 +479,9 @@ void switchToPreviousTheme() {
     ESP_LOGI(TAG, "Switched from %s to %s theme", THEME_NAMES[oldTheme], THEME_NAMES[currentTheme]);
 
     // Force immediate visual update
-    const uint8_t* currentHues = getCurrentColorArray();
-    uint8_t newHue = currentHues[hueIndex];
-    fill_solid(leds, numLeds, CHSV(newHue, 255, 200));
+    const PaletteColor* currentColors = getCurrentColorArray();
+    PaletteColor newColor = currentColors[hueIndex];
+    fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
     FastLED.show();
 }
 
@@ -519,9 +526,9 @@ void toggleAllLEDs() {
     } else {
         // Turn on all LEDs with current hue from current theme
         ESP_LOGI(TAG, "Turning ON all LEDs");
-        const uint8_t* currentHues = getCurrentColorArray();
-        uint8_t hue = currentHues[hueIndex];
-        fill_solid(leds, numLeds, CHSV(hue, 255, 200));
+        const PaletteColor* currentColors = getCurrentColorArray();
+        PaletteColor color = currentColors[hueIndex];
+        fill_solid(leds, numLeds, CHSV(color.h, color.s, color.v));
         FastLED.show();
         ESP_LOGI(TAG, "All LEDs turned ON (Theme: %s)", THEME_NAMES[currentTheme]);
     }
@@ -777,6 +784,11 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
             // update here.
             fx.blendTimeout = nowMs();
             fx.rotateTimeout = nowMs();
+            // issue #0015: the seven new renderers tick off one shared
+            // effectTimeout deadline via nowMs() -- it needs the same
+            // rebase as blendTimeout/rotateTimeout above, or a chase/strobe
+            // in flight strands here exactly like #0008's round-2 defect.
+            fx.effectTimeout = nowMs();
 
             // The ~67s bench runway documented for this harness (issue
             // #0008) only holds if the command lands within seconds of
@@ -854,9 +866,9 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
                 if (!ledsEnabled) ledsEnabled = true; // Use direct flag to avoid toggle logic
                 
                 // Force immediate visual update
-                const uint8_t* currentHues = getCurrentColorArray();
-                uint8_t newHue = currentHues[hueIndex];
-                fill_solid(leds, numLeds, CHSV(newHue, 255, 200));
+                const PaletteColor* currentColors = getCurrentColorArray();
+                PaletteColor newColor = currentColors[hueIndex];
+                fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
                 FastLED.show();
                 publishState();
             }
@@ -1039,9 +1051,43 @@ void applyMirror() {
     FastLED.show();
 }
 
+#ifdef DEV_FORCE_EFFECT
+#ifndef DEV_FORCE_EFFECT_MODE
+#define DEV_FORCE_EFFECT_MODE EFFECT_CHASE
+#endif
+#endif
+
 void setupLED() {
     // Load all saved preferences (theme, brightness, hue, led config)
     loadAllPreferences();
+
+#ifdef DEV_FORCE_EFFECT
+    // Bench-only hook (issue #0015 section 11): nothing can SET_EFFECT over
+    // MQTT until issue #0016 lands, so this forces THEME_CUSTOM with a
+    // chosen EffectMode at boot -- the only way to drive the seven new
+    // renderers on real hardware before then. Runs AFTER loadAllPreferences()
+    // deliberately: that call's THEME_CUSTOM boot guard (which falls back to
+    // THEME_GREEN whenever customEffect.colorCount == 0) has already run by
+    // this point, so populating customEffect here isn't undone by it.
+    //
+    // -DDEV_FORCE_EFFECT_MODE=EFFECT_STROBE (or any other EFFECT_* value)
+    // on the pio command line picks the mode without editing this file;
+    // default is EFFECT_CHASE. Same precedent as ENABLE_CLOCK_OFFSET:
+    // compiled ONLY under [env:esp32c3-debug]'s DEV_FORCE_EFFECT flag, never
+    // in a release build -- confirmed by the release firmware.bin size being
+    // unchanged by this flag's addition.
+    customEffect.mode = DEV_FORCE_EFFECT_MODE;
+    customEffect.colors[0] = CRGB(255, 0, 0);
+    customEffect.colors[1] = CRGB(0, 255, 0);
+    customEffect.colors[2] = CRGB(0, 0, 255);
+    customEffect.colorCount = 3;
+    customEffect.speed = 128;
+    customEffect.intensity = 128;
+    refreshCustomPalette();
+    currentTheme = THEME_CUSTOM;
+    ESP_LOGI(TAG, "*** DEV_FORCE_EFFECT ACTIVE: forcing THEME_CUSTOM, mode=%d ***",
+             (int)customEffect.mode);
+#endif
 
     // Initialize with MAX_LEDS so we can change numLeds at runtime without re-initializing
     FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, MAX_LEDS);
@@ -1059,6 +1105,7 @@ void setupLED() {
     // setupLED() before this refactor either -- only hueTimeout and
     // timeouts[] were seeded).
     fx.timeouts = timeouts;
+    fx.sparkleVal = sparkleValues;  // issue #0015: SPARKLE's per-LED brightness array
     fx.hueTimeout = now + 2000;
     fx.rng = arduinoRandomRange;
     logTimeout = now + logInterval;
@@ -1094,12 +1141,29 @@ void loopLED() {
     }
 
     // Dispatch on EffectMode rather than theme (issue #0014). `default ->
-    // renderBlend` is load-bearing: the seven unimplemented modes
-    // (CHASE/WIPE/SCAN/SPARKLE/PULSE/STROBE/COLORLOOP, issue #0015) are
-    // unreachable in this phase -- nothing populates customEffect -- but if
-    // one is ever reached the strip blends rather than going dark or
+    // renderBlend` is load-bearing for any future mode value this switch
+    // doesn't otherwise name -- the strip blends rather than going dark or
     // falling off the end of a jump table.
     EffectMode mode = getCurrentEffectMode();
+
+    // Per-frame speed/intensity inputs (issue #0015). Built-ins (BLEND/
+    // FLICKER) ignore both -- passing 128/128 is a definiteness choice, not
+    // a behavior one, and it means a future built-in mapped onto one of the
+    // seven new modes gets sane defaults for free.
+    const uint8_t EFFECT_DEFAULT_PARAM = 128;
+    fx.speed     = (currentTheme == THEME_CUSTOM) ? customEffect.speed     : EFFECT_DEFAULT_PARAM;
+    fx.intensity = (currentTheme == THEME_CUSTOM) ? customEffect.intensity : EFFECT_DEFAULT_PARAM;
+
+    // Mode-change reset (issue #0015): only the #0015 fields, never
+    // blendTimeout/rotateTimeout/hueTimeout/blendOffset/timeouts[] -- see
+    // resetEffectState()'s comment in src/effects.h. fx.lastMode
+    // zero-initializes to EFFECT_BLEND, so a device booting into Green
+    // (FLICKER) fires exactly one reset here that touches nothing FLICKER
+    // reads.
+    if (mode != fx.lastMode) {
+        resetEffectState(fx, nowMs());
+        fx.lastMode = mode;
+    }
 
     fx.leds = leds;
     fx.numLeds = numLeds;
@@ -1119,6 +1183,27 @@ void loopLED() {
             // timeouts[] under the SET_CLOCK_OFFSET bench harness, which
             // only rebases the two blend timers (issue #0008). Out of scope.
             drew = renderFlicker(fx, millis());
+            break;
+        case EFFECT_CHASE:
+            drew = renderChase(fx, nowMs());
+            break;
+        case EFFECT_WIPE:
+            drew = renderWipe(fx, nowMs());
+            break;
+        case EFFECT_SCAN:
+            drew = renderScan(fx, nowMs());
+            break;
+        case EFFECT_SPARKLE:
+            drew = renderSparkle(fx, nowMs());
+            break;
+        case EFFECT_PULSE:
+            drew = renderPulse(fx, nowMs());
+            break;
+        case EFFECT_STROBE:
+            drew = renderStrobe(fx, nowMs());
+            break;
+        case EFFECT_COLORLOOP:
+            drew = renderColorloop(fx, nowMs());
             break;
         case EFFECT_BLEND:
         default:
