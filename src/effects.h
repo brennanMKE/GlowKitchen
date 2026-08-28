@@ -653,10 +653,36 @@ inline bool renderColorloop(EffectState& s, uint32_t now) {
     if (hue != target) {
         uint8_t fwd = (uint8_t)(target - hue);
         uint8_t bwd = (uint8_t)(hue - target);
-        hue = (fwd <= bwd) ? (uint8_t)(hue + 1) : (uint8_t)(hue - 1);
+        uint8_t dist = (fwd <= bwd) ? fwd : bwd;
+        // Issue #0018: this used to advance a fixed +/-1 per tick, which made
+        // the time to reach a colour depend on how far apart the palette
+        // entries happened to be -- 80-128 hue units is typical for
+        // well-separated colours, so a single transition took 80-128 ticks and
+        // a 3-colour palette took ~30 s at default speed. It read as a static
+        // colour, which is the one thing this mode must not do. `speed` only
+        // moved the tick interval, so it could not fix the rate: the step size
+        // was the wrong knob left at 1.
+        //
+        // Step now scales with speed (1 at speed 0, 12 at speed 255), so speed
+        // controls the perceived rate rather than only the frame cadence. At
+        // the default speed 128 that is a step of 6 every ~31 ms, crossing a
+        // 128-unit gap in about 0.7 s. Snapping when dist <= step keeps the
+        // walk from stepping past the target and oscillating around it.
+        uint8_t step = (uint8_t)(1 + ((uint32_t)s.speed * 11) / 255);
+        if (dist <= step) {
+            hue = target;
+        } else {
+            hue = (fwd <= bwd) ? (uint8_t)(hue + step) : (uint8_t)(hue - step);
+        }
         s.effectSub = hue;
     }
-    if (hue == target && s.colorChangeEnabled) {
+    // Issue #0018: COLORLOOP deliberately ignores colorChangeEnabled, unlike
+    // every other renderer. Elsewhere that flag means "should the palette
+    // advance"; here advancing the palette IS the effect, so honouring it left
+    // the hue parked on the first entry forever -- a colour loop showing one
+    // colour. Turning colour change off now dims/holds the other modes as
+    // before and leaves this one looping.
+    if (hue == target) {
         s.effectPhase = (s.effectPhase + 1) % s.colorCount;
         s.hueIndex = s.effectPhase;
     }

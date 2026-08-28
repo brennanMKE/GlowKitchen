@@ -878,6 +878,106 @@ void test_rgb_to_palette_near_black_low_delta(void) {
     assertPaletteColor(10, 8, 9, 234, 51, 10, "near-black, delta=2");
 }
 
+
+// ---- Issue #0018: COLORLOOP must read as animation, and must keep looping --
+//
+// Both gates are derived from the arithmetic that produced the bug, not from
+// its appearance -- the lesson #0008 and #0014 paid for twice. The rate gate
+// fails on the shipped +/-1 step; the looping gate fails whenever the renderer
+// honours colorChangeEnabled.
+
+// A palette whose entries are far apart in hue, which is exactly the case the
+// old fixed +/-1 step handled worst (adjacent entries 85 units apart).
+static void colorloopState(EffectState& s, uint8_t* subBuf, uint8_t speed,
+                           bool colorChangeEnabled) {
+    (void)subBuf;
+    s = EffectState{};
+    s.leds = nullptr;
+    s.colors = GATE_PALETTE;
+    s.colorCount = GATE_COLOR_COUNT;
+    s.colorChangeEnabled = colorChangeEnabled;
+    s.speed = speed;
+    s.intensity = 128;
+    s.brightness = 200;
+    s.maxBrightness = 255;
+}
+
+// Drive the renderer for `ms` of simulated time and report how many distinct
+// palette entries it completed a transition to.
+static int colorloopCyclesIn(uint8_t speed, bool colorChangeEnabled, uint32_t ms) {
+    CRGB leds[16];
+    EffectState s;
+    colorloopState(s, nullptr, speed, colorChangeEnabled);
+    s.leds = leds;
+    s.numLeds = 16;
+
+    int reached = 0;
+    int lastPhase = s.effectPhase;
+    for (uint32_t now = 1000; now < 1000 + ms; now++) {
+        renderColorloop(s, now);
+        if (s.effectPhase != lastPhase) { reached++; lastPhase = s.effectPhase; }
+    }
+    return reached;
+}
+
+// At the default speed a 3-colour palette must get through a full cycle in a
+// couple of seconds. The shipped +/-1 step needed ~10 s per colour, so this
+// asserts a bound the old code misses by an order of magnitude.
+void test_colorloop_completes_cycle_at_default_speed(void) {
+    int reached = colorloopCyclesIn(128, true, 3000);
+    char msg[96];
+    snprintf(msg, sizeof(msg),
+             "COLORLOOP reached %d palette entries in 3 s at speed 128; want >= 3", reached);
+    TEST_ASSERT_TRUE_MESSAGE(reached >= GATE_COLOR_COUNT, msg);
+}
+
+// Speed must move the perceived rate, not just the frame cadence: fast has to
+// get through strictly more colours than slow in the same wall-clock window.
+void test_colorloop_speed_changes_perceived_rate(void) {
+    int slow = colorloopCyclesIn(0, true, 3000);
+    int fast = colorloopCyclesIn(255, true, 3000);
+    char msg[96];
+    snprintf(msg, sizeof(msg), "COLORLOOP slow=%d fast=%d entries in 3 s; want fast > slow",
+             slow, fast);
+    TEST_ASSERT_TRUE_MESSAGE(fast > slow, msg);
+}
+
+// The mode's whole purpose is cycling, so colorChangeEnabled=false must not
+// freeze it on one colour. This fails on the shipped renderer, which parks the
+// hue on the first palette entry forever.
+void test_colorloop_loops_with_color_change_disabled(void) {
+    int reached = colorloopCyclesIn(128, false, 3000);
+    char msg[104];
+    snprintf(msg, sizeof(msg),
+             "COLORLOOP reached %d entries in 3 s with colorChangeEnabled=false; want >= 3",
+             reached);
+    TEST_ASSERT_TRUE_MESSAGE(reached >= GATE_COLOR_COUNT, msg);
+}
+
+// The step must never overshoot and orbit the target: every phase advance has
+// to land exactly on a palette hue.
+void test_colorloop_lands_exactly_on_palette_hues(void) {
+    CRGB leds[16];
+    EffectState s;
+    colorloopState(s, nullptr, 255, true);
+    s.leds = leds;
+    s.numLeds = 16;
+
+    int lastPhase = s.effectPhase;
+    for (uint32_t now = 1000; now < 6000; now++) {
+        renderColorloop(s, now);
+        if (s.effectPhase != lastPhase) {
+            uint8_t landed = GATE_PALETTE[lastPhase % GATE_COLOR_COUNT].h;
+            char msg[96];
+            snprintf(msg, sizeof(msg), "phase %d advanced at hue %u, expected exact %u",
+                     lastPhase, (unsigned)s.effectSub, (unsigned)landed);
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(landed, s.effectSub, msg);
+            lastPhase = s.effectPhase;
+        }
+    }
+}
+
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
     RUN_TEST(test_theme_green_matches_legacy);
@@ -911,6 +1011,12 @@ int main(int argc, char** argv) {
     RUN_TEST(test_rgb_to_palette_achromatic);
     RUN_TEST(test_rgb_to_palette_sector_seams);
     RUN_TEST(test_rgb_to_palette_near_black_low_delta);
+
+    // Issue #0018: COLORLOOP rate and looping.
+    RUN_TEST(test_colorloop_completes_cycle_at_default_speed);
+    RUN_TEST(test_colorloop_speed_changes_perceived_rate);
+    RUN_TEST(test_colorloop_loops_with_color_change_disabled);
+    RUN_TEST(test_colorloop_lands_exactly_on_palette_hues);
 
     return UNITY_END();
 }
