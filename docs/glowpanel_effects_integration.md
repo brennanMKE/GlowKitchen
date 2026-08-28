@@ -189,6 +189,53 @@ FLICKER and COLORLOOP.** The cleanest way to surface this is to disable those
 three modes (with a reason) the moment a swatch is not fully saturated, rather
 than letting the user pick a combination the firmware will quietly flatten.
 
+### How many colours? Eight, and it is a hard limit
+
+`MAX_CUSTOM_COLORS` is **8** (`src/effects.h`). The legal range is **1 to 8
+inclusive** — there is no way to send zero, and no way to send nine.
+
+The limit is enforced in three independent places, so there is no path around
+it:
+
+| Where | Check | On violation |
+|---|---|---|
+| `parseEffectPayload()` — empty array | `[]` | `EFFECT_PARSE_BAD_COLOR_COUNT` |
+| `parseEffectPayload()` — 9th element | `count >= MAX_CUSTOM_COLORS` | `EFFECT_PARSE_BAD_COLOR_COUNT` |
+| `customEffectIsValid()` | `colorCount < 1 \|\| colorCount > 8` | effect rejected, also on the NVS reload at boot |
+
+**A 9-colour payload is rejected outright, not truncated to 8.** The whole
+command is discarded and the strip keeps doing exactly what it was already
+doing — and because a rejected payload produces no MQTT reply at all, the panel
+sees silence, identical to a message that never arrived. This is the single
+most likely way a colour-picker UI goes wrong: a user adds a ninth swatch, the
+lights do not change, and nothing anywhere says why.
+
+So the UI must enforce 1–8 itself. Concretely:
+
+- Disable or hide the "add colour" control at 8 swatches.
+- Disable the per-swatch remove control at 1 swatch.
+- Re-check `len(colors)` in Go before publishing, as in the `SetEffect` sketch
+  under **Building the payload** below, so a bug in the UI surfaces as an error
+  string rather than as silence.
+
+Covered by `test_case10_nine_colors_rejected` in `test/test_effect_parse/`, so
+this behaviour will not drift.
+
+### Why eight
+
+`CustomEffectConfig.colors` is a fixed `CRGB[8]` — 24 bytes — stored in NVS as
+one `putBytes` blob under `fx_cfg` and versioned by `SETTINGS_VERSION`. Raising
+the ceiling means growing that struct, which changes the persisted blob size
+and needs a `SETTINGS_VERSION` bump plus a migration path for devices already
+holding a version-2 blob. It is not a one-line change, and there has been no
+demand for it: eight distinct colours on a strip already reads as busy, and the
+sequential modes spend eight cycles getting back to where they started.
+
+There is separately a 512-byte MQTT receive buffer on the device. The longest
+legal payload — a 9-character mode name, eight `#RRGGBB` colours and all three
+optional fields — is comfortably inside it, so the colour ceiling is the
+binding constraint, not the buffer.
+
 ### What you pick is not exactly what you get
 
 Colours are converted to HSV on the device and back to RGB by FastLED's
