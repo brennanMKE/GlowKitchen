@@ -8,12 +8,14 @@
 # lights/all/cmd) and only when the host is on the local network, so this
 # cannot be pointed at the internet or fan out to the whole fleet.
 #
-# Usage: ./scripts/ota_local.sh <device> [port]
+# Usage: ./scripts/ota_local.sh [--host <addr>] <device> [port]
+#   --host: MQTT broker hostname or IP (default: $MQTT_BROKER or homeassistant.local)
 #   device: kitchen, tv, desk, workbench, recycling, Dev, or a hardware id
 #   port:   HTTP port to serve on (default 8000)
 #
-# Example:
+# Examples:
 #   ./scripts/ota_local.sh kitchen
+#   ./scripts/ota_local.sh --host 192.168.88.254 kitchen
 #
 # NOTE: a device you push to this way is still subject to the nightly GitHub
 # check, which would replace your dev build with the released tag. Pin it first:
@@ -22,15 +24,20 @@
 #   ./scripts/configure_device.sh kitchen ota_auto true
 
 # Configuration
-BROKER="homeassistant.local"
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/lib/broker.sh"
+parse_broker_args "$@"
+set -- "${ARGS[@]}"
 # The release env deliberately, not esp32c3-debug: a verbose build is ~45 KB
 # larger than the 0x140000 OTA slot, so it cannot be pushed over the air at all.
 # Debug builds have to go on over USB (pio run -e esp32c3-debug -t upload).
 BIN=".pio/build/esp32c3/firmware.bin"
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <device> [port]"
+    echo "Usage: $0 [--host <addr>] <device> [port]"
+    echo "$BROKER_USAGE"
     echo "Example: $0 kitchen"
+    echo "Example: $0 --host 192.168.88.254 kitchen"
     exit 1
 fi
 

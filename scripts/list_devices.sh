@@ -1,7 +1,19 @@
 #!/bin/zsh
 
+# Ask every device on the broker to report its status.
+#
+# Usage: ./scripts/list_devices.sh [--host <addr>]
+#   --host: MQTT broker hostname or IP (default: $MQTT_BROKER or homeassistant.local)
+#
+# Examples:
+#   ./scripts/list_devices.sh
+#   ./scripts/list_devices.sh --host 192.168.88.254
+
 # Configuration
-BROKER="homeassistant.local"
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/lib/broker.sh"
+parse_broker_args "$@"
+set -- "${ARGS[@]}"
 TIMEOUT=3  # Wait 3 seconds for responses
 
 echo "Requesting status from all devices..."

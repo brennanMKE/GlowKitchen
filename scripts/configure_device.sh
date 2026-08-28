@@ -1,11 +1,16 @@
 #!/bin/zsh
 
 # Configuration
-BROKER="homeassistant.local"
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/lib/broker.sh"
+parse_broker_args "$@"
+set -- "${ARGS[@]}"
 
 # Check arguments
 if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 [device] [option] [value]"
+    echo "Usage: $0 [--host <addr>] [device] [option] [value]"
+    echo ""
+    echo "$BROKER_USAGE"
     echo ""
     echo "Options:"
     echo "  num_leds <count>        Set number of LEDs"
@@ -20,6 +25,7 @@ if [[ $# -lt 2 ]]; then
     echo "  $0 kitchen num_leds 240"
     echo "  $0 desk brightness 200"
     echo "  $0 all ir false"
+    echo "  $0 --host 192.168.88.254 all ir false"
     exit 1
 fi
 

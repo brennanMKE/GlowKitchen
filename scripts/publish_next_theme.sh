@@ -1,7 +1,15 @@
 #!/bin/zsh
 
+# Advance the whole fleet to the next theme in the rotation.
+#
+# Usage: ./scripts/publish_next_theme.sh [--host <addr>]
+#   --host: MQTT broker hostname or IP (default: $MQTT_BROKER or homeassistant.local)
+
 # Configuration
-BROKER="homeassistant.local"
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/lib/broker.sh"
+parse_broker_args "$@"
+set -- "${ARGS[@]}"
 TOPIC="lights/all/cmd"
 STATE_FILE="$HOME/.glow_kitchen_theme"
 

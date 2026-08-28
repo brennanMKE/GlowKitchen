@@ -9,3 +9,6 @@
 lib/Config/Config.h
 
 opencode.json
+
+# Local credentials — never commit
+.env

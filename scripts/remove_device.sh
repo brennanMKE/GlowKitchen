@@ -1,12 +1,17 @@
 #!/bin/zsh
 
 # Configuration
-BROKER="homeassistant.local"
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/lib/broker.sh"
+parse_broker_args "$@"
+set -- "${ARGS[@]}"
 
 # Check if device ID was provided
 if [[ -z "$1" ]]; then
-    echo "Usage: $0 <device-id>"
+    echo "Usage: $0 [--host <addr>] <device-id>"
+    echo "$BROKER_USAGE"
     echo "Example: $0 84fce68773d0"
+    echo "Example: $0 --host 192.168.88.254 84fce68773d0"
     exit 1
 fi
 

@@ -5,15 +5,20 @@
 # it fetches the latest release tag and, if it differs from the running version,
 # downloads and flashes it, then reboots.
 #
-# Usage: ./scripts/ota_update.sh [device]
+# Usage: ./scripts/ota_update.sh [--host <addr>] [device]
+#   --host: MQTT broker hostname or IP (default: $MQTT_BROKER or homeassistant.local)
 #   device: kitchen, tv, desk, a hardware id, or all   (default: all)
 #
 # Examples:
-#   ./scripts/ota_update.sh           # all devices
-#   ./scripts/ota_update.sh kitchen   # just the kitchen
+#   ./scripts/ota_update.sh                             # all devices
+#   ./scripts/ota_update.sh kitchen                     # just the kitchen
+#   ./scripts/ota_update.sh --host 192.168.88.254 all   # broker by IP
 
 # Configuration
-BROKER="homeassistant.local"
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/lib/broker.sh"
+parse_broker_args "$@"
+set -- "${ARGS[@]}"
 
 DEVICE="${1:-all}"
 TOPIC="lights/$DEVICE/cmd"
