@@ -17,6 +17,7 @@
 // satisfies it. effects.h itself pulls in themes.h (HueTheme, THEME_NAMES[],
 // the six hue arrays) and time_utils.h (already included directly above).
 #include "effects.h"
+#include "theme_command.h"
 // effect_parse.h (issue #0016): the hand-rolled SET_EFFECT payload parser
 // and the NVS load decision. Include-order contract already satisfied by
 // <FastLED.h> above (see effects.h's own comment).
@@ -1190,6 +1191,31 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
             themeIdentified = true;
         }
 
+        // Issue #0021: an active custom effect outranks a theme command that
+        // arrives on the broadcast topic. The fleet's broker carries a RETAINED
+        // theme on lights/all/cmd (a `FOREST` put there by a Home Assistant
+        // automation), and MQTT redelivers a retained message on every
+        // reconnect -- so any custom effect was silently cancelled seconds
+        // later by a message nobody sent, and the device could never hold an
+        // effect across a WiFi blip. The effect and its expiry are device-owned
+        // state; a broadcast aimed at the whole fleet is not a reason to
+        // discard them.
+        //
+        // Scoped to broadcasts on purpose. A theme sent to THIS device's own
+        // topic is someone deliberately taking control of this strip and still
+        // wins immediately -- that, and CLEAR_EFFECT, are how a person overrides
+        // a running effect. Same reasoning as the OTA_URL broadcast refusal
+        // above: /all/ is for the fleet, the device topic is for the device.
+        if (themeIdentified &&
+            shouldIgnoreBroadcastTheme(topic, currentTheme == THEME_CUSTOM)) {
+            ESP_LOGI(TAG, "Ignoring broadcast theme '%s' on %s: custom effect active "
+                          "(mode=%s, %ld s remaining)",
+                     msgUpper.c_str(), topic, EFFECT_MODE_NAMES[customEffect.mode],
+                     (long)effectTimeoutRemainingSeconds(customEffect.timeoutMs,
+                                                         customEffect.activatedAt, nowMs()));
+            themeIdentified = false;
+        }
+
         if (themeIdentified) {
             if (newTheme != currentTheme || !ledsEnabled) {
                 // Issue #0016: an explicit theme command must cancel an
@@ -1947,6 +1973,14 @@ void loopOta() {
 
 void setup() {
     Serial.begin(115200);
+    // Issue #0020: the console is the C3's native USB CDC (ARDUINO_USB_CDC_ON_BOOT),
+    // and HWCDC::write() blocks up to tx_timeout_ms whenever isPlugged() is true --
+    // which reports whether the CABLE is enumerated, not whether anything is reading
+    // the port. A plugged-in board with no monitor attached therefore blocks on every
+    // log write, stalling loop() and with it MQTT and the effect timeout. Zero makes
+    // logging lossy instead of blocking, which is the right trade in both directions:
+    // nobody listening means nobody misses the output.
+    Serial.setTxTimeoutMs(0);
 
     fwVersionMarkerAnchor = FW_VERSION_MARKER;  // pin the version marker into the binary
     ESP_LOGI(TAG, "Booted firmware %s", FIRMWARE_VERSION);
