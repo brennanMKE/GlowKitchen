@@ -5,6 +5,7 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/lib/broker.sh"
 parse_broker_args "$@"
 set -- "${ARGS[@]}"
+require_mqtt_password
 
 # Check arguments
 if [[ $# -lt 2 ]]; then
@@ -64,7 +65,7 @@ case "$OPTION" in
 esac
 
 echo "Sending $PAYLOAD to $TOPIC..."
-/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "$TOPIC" -m "$PAYLOAD"
 
 echo "Configuration sent."

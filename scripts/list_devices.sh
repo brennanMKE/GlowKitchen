@@ -14,12 +14,13 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/lib/broker.sh"
 parse_broker_args "$@"
 set -- "${ARGS[@]}"
+require_mqtt_password
 TIMEOUT=3  # Wait 3 seconds for responses
 
 echo "Requesting status from all devices..."
 
 # Request all devices to report status
-/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "lights/all/cmd" -m "STATUS"
 
 echo "Listening for responses (${TIMEOUT}s timeout)..."
@@ -30,7 +31,7 @@ TMPFILE=$(mktemp)
 trap "rm -f $TMPFILE" EXIT
 
 # Subscribe with verbose output to get topic names
-/opt/homebrew/bin/mosquitto_sub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_sub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "lights/+/state" -W $TIMEOUT -v 2>/dev/null > "$TMPFILE"
 
 # Process responses, deduplicating by device

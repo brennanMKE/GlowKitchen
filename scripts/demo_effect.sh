@@ -22,19 +22,12 @@
 # Credentials come from the repo .env (MQTT_USERNAME / MQTT_PASSWORD).
 
 SCRIPT_DIR="${0:A:h}"
-REPO_ROOT="${SCRIPT_DIR:h}"
 
-# Load .env BEFORE parse_broker_args: broker.sh resolves the default host from
-# $MQTT_BROKER, so sourcing afterwards leaves it falling back to
-# homeassistant.local -- which does not resolve on every network the devices
-# live on. An explicit --host still wins over both.
-if [[ -f "$REPO_ROOT/.env" ]]; then
-    set -a; source "$REPO_ROOT/.env"; set +a
-fi
-
+# broker.sh loads the repo .env and resolves $BROKER, $MQTT_USER and $MQTT_PORT.
 source "$SCRIPT_DIR/lib/broker.sh"
 parse_broker_args "$@"
 set -- "${ARGS[@]}"
+require_mqtt_password
 
 # Presets: name -> "MODE|colors|speed|intensity|default_seconds|description"
 #
@@ -113,14 +106,9 @@ done
 
 TOPIC="lights/$DEVICE/cmd"
 
-if [[ -z "$MQTT_PASSWORD" ]]; then
-    echo "Error: MQTT_PASSWORD is not set. Populate $REPO_ROOT/.env (see .env.example)." >&2
-    exit 1
-fi
-
 publish() {
     /opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p "${MQTT_PORT:-1883}" \
-        -u "${MQTT_USERNAME:-mqtt}" -P "$MQTT_PASSWORD" -t "$TOPIC" -m "$1"
+        -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$TOPIC" -m "$1"
 }
 
 if [[ "$PRESET" == "stop" ]]; then

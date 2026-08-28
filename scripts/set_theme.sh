@@ -5,6 +5,7 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/lib/broker.sh"
 parse_broker_args "$@"
 set -- "${ARGS[@]}"
+require_mqtt_password
 STATE_FILE="$HOME/.glow_kitchen_theme"
 
 # Check arguments
@@ -40,7 +41,7 @@ if [[ "$DEVICE" == "all" ]]; then
 fi
 
 echo "Setting theme to $THEME for $DEVICE..."
-/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "$TOPIC" -m "$THEME" -r
 
 echo "Theme update sent."

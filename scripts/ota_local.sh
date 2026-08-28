@@ -28,6 +28,7 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/lib/broker.sh"
 parse_broker_args "$@"
 set -- "${ARGS[@]}"
+require_mqtt_password
 # The release env deliberately, not esp32c3-debug: a verbose build is ~45 KB
 # larger than the 0x140000 OTA slot, so it cannot be pushed over the air at all.
 # Debug builds have to go on over USB (pio run -e esp32c3-debug -t upload).
@@ -84,13 +85,13 @@ fi
 echo "Sending OTA_URL to lights/$DEVICE/cmd..."
 # Deliberately NOT retained: a retained OTA_URL would re-flash the device every
 # time it reconnected to the broker.
-/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "lights/$DEVICE/cmd" -m "OTA_URL:$URL"
 
 echo "Waiting for $DEVICE to download and reboot (up to 90s)..."
 echo "Watching lights/$DEVICE/state for the firmware version..."
 
-/opt/homebrew/bin/mosquitto_sub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_sub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "lights/$DEVICE/state" -W 90 2>/dev/null | while IFS= read -r line; do
     ver=$(printf '%s\n' "$line" | /opt/homebrew/bin/jq -r '.firmwareVersion // "?"' 2>/dev/null)
     echo "  $DEVICE reported firmware $ver"

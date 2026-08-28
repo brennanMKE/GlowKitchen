@@ -5,6 +5,7 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/lib/broker.sh"
 parse_broker_args "$@"
 set -- "${ARGS[@]}"
+require_mqtt_password
 TIMEOUT=2
 
 # Check arguments
@@ -21,14 +22,14 @@ DEVICE=$1
 echo "Requesting status from $DEVICE..."
 
 # Request device to report status
-/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "lights/$DEVICE/cmd" -m "STATUS"
 
 echo "Listening for response (${TIMEOUT}s timeout)..."
 echo ""
 
 # Subscribe to specific device state topic
-/opt/homebrew/bin/mosquitto_sub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_sub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "lights/$DEVICE/state" -W $TIMEOUT 2>/dev/null | while read line; do
     # Pretty print JSON
     echo "$line" | /opt/homebrew/bin/jq '.' 2>/dev/null || echo "$line"

@@ -19,6 +19,7 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/lib/broker.sh"
 parse_broker_args "$@"
 set -- "${ARGS[@]}"
+require_mqtt_password
 
 DEVICE="${1:-all}"
 TOPIC="lights/$DEVICE/cmd"
@@ -28,7 +29,7 @@ echo "Sending OTA_UPDATE to $TOPIC..."
 # NOTE: deliberately NOT retained (no -r). OTA_UPDATE is a one-shot trigger;
 # a retained trigger would make every device re-run the check each time it
 # reconnects to the broker.
-/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "$TOPIC" -m "OTA_UPDATE"
 
 echo "OTA check requested."

@@ -5,6 +5,7 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/lib/broker.sh"
 parse_broker_args "$@"
 set -- "${ARGS[@]}"
+require_mqtt_password
 
 # Check if device ID was provided
 if [[ -z "$1" ]]; then
@@ -22,7 +23,7 @@ echo "Removing retained message for device: $DEVICE_ID"
 echo "Topic: $TOPIC"
 
 # Publish empty message with retain flag to delete the retained message
-/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p 1883 -u mqtt -P "$MQTT_PASSWORD" \
+/opt/homebrew/bin/mosquitto_pub -h "$BROKER" -p "$MQTT_PORT" -u "$MQTT_USER" -P "$MQTT_PASSWORD" \
   -t "$TOPIC" -n -r
 
 if [[ $? -eq 0 ]]; then
