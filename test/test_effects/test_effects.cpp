@@ -154,6 +154,14 @@ static void runThemeDiff(const ThemeFixture& theme, EffectMode mode, uint32_t st
     a.hueTimeout = startNow + 2000;
     a.blendOffset = initialBlendOffset;
     a.rng = rngA;
+    // What main.cpp passes for every built-in theme (EFFECT_DEFAULT_PARAM).
+    // renderFlicker() reads both now, and its mapping is built so that 128
+    // reproduces the pre-#0014 constants exactly -- so this is the setting
+    // under which the frame-for-frame diff against legacyFlicker() is the
+    // compatibility promise rather than a coincidence. Leaving them at the
+    // zero-initialised 0 would diff a renderer nothing ever runs.
+    a.speed = 128;
+    a.intensity = 128;
 
     // Field-by-field, not `LegacyEffectState b = a;` -- the two are
     // different types on purpose (see comment above).
@@ -307,6 +315,12 @@ static const RendererSpec RENDERERS[] = {
     {"PULSE",     renderPulse,     40, 4},
     {"STROBE",    renderStrobe,   600, 40},
     {"COLORLOOP", renderColorloop, 60, 2},
+    // Issue #0021. NEON is deliberately absent: like FLICKER it is driven by
+    // per-LED timeouts[] rather than a single speedInterval() deadline, so the
+    // tick-cadence gates below do not describe it. It has its own tests.
+    {"RAIN",      renderRain,      50, 3},
+    {"TRAIL",     renderTrail,     40, 2},
+    {"STACK",     renderStack,     60, 4},
 };
 static const int NUM_RENDERERS = sizeof(RENDERERS) / sizeof(RENDERERS[0]);
 
@@ -978,6 +992,252 @@ void test_colorloop_lands_exactly_on_palette_hues(void) {
 }
 
 
+
+// ===== Multi-run CHASE and the Flicker knobs =================================
+// CHASE used to paint one run and rotate its colour once per lap; it now paints
+// one run per palette colour. The shim stores CHSV as {h,s,v} in {r,g,b}, so
+// leds[i].r is the hue and leds[i].b is the value -- which is also why
+// countLit() above is counting value, not blue.
+
+// All of the palette is on the strip at once, not one colour per lap. This is
+// the whole point of the change: four ghosts, not one ghost at a time.
+void test_chase_paints_one_run_per_colour(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+    rngStateA = RNG_SEED;
+    EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 128, 128, 1000u, rngA);
+
+    uint32_t now = 1000u;
+    for (int f = 0; f < 40; f++) { renderChase(s, now); now += 25; }
+
+    uint8_t base = (uint8_t)(TEST_BRIGHTNESS < TEST_MAX_BRIGHTNESS ? TEST_BRIGHTNESS : TEST_MAX_BRIGHTNESS);
+    for (int c = 0; c < GATE_COLOR_COUNT; c++) {
+        bool found = false;
+        for (int i = 0; i < TEST_NUM_LEDS && !found; i++) {
+            if (leds[i].b == base && leds[i].r == GATE_PALETTE[c].h) found = true;
+        }
+        char msg[96];
+        snprintf(msg, sizeof(msg), "CHASE: palette hue %d absent; runs are not concurrent", (int)GATE_PALETTE[c].h);
+        TEST_ASSERT_TRUE_MESSAGE(found, msg);
+    }
+}
+
+// Each run trails off rather than ending square. Without a tail every lit LED
+// sits at exactly `base`.
+void test_chase_runs_have_a_tail(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+    rngStateA = RNG_SEED;
+    EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 128, 255, 1000u, rngA);
+
+    uint32_t now = 1000u;
+    for (int f = 0; f < 40; f++) { renderChase(s, now); now += 25; }
+
+    uint8_t base = (uint8_t)(TEST_BRIGHTNESS < TEST_MAX_BRIGHTNESS ? TEST_BRIGHTNESS : TEST_MAX_BRIGHTNESS);
+    int partial = 0;
+    for (int i = 0; i < TEST_NUM_LEDS; i++) {
+        if (leds[i].b > 0 && leds[i].b < base) partial++;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(partial > 0, "CHASE: no partially lit LEDs, so no tail");
+}
+
+// SCAN's uniform band is deliberate (see renderScan's comment), so the shared
+// paintRun() gaining a tail must not have given SCAN one.
+void test_scan_still_has_no_tail(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+    rngStateA = RNG_SEED;
+    EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 128, 255, 1000u, rngA);
+
+    uint32_t now = 1000u;
+    for (int f = 0; f < 40; f++) { renderScan(s, now); now += 25; }
+
+    uint8_t base = (uint8_t)(TEST_BRIGHTNESS < TEST_MAX_BRIGHTNESS ? TEST_BRIGHTNESS : TEST_MAX_BRIGHTNESS);
+    for (int i = 0; i < TEST_NUM_LEDS; i++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "SCAN: LED %d at value %d, neither off nor base", i, (int)leds[i].b);
+        TEST_ASSERT_TRUE_MESSAGE(leds[i].b == 0 || leds[i].b == base, msg);
+    }
+}
+
+// A short strip cannot hold one run per colour. Rather than painting a solid
+// bar, the renderer falls back to a single run.
+void test_chase_falls_back_to_one_run_on_a_short_strip(void) {
+    static CRGB leds[4];
+    static uint8_t sparkleBuf[4];
+    rngStateA = RNG_SEED;
+    EffectState s = makeGateState(leds, sparkleBuf, 4, 128, 255, 1000u, rngA);
+
+    uint32_t now = 1000u;
+    for (int f = 0; f < 10; f++) { renderChase(s, now); now += 25; }
+
+    int lit = 0;
+    for (int i = 0; i < 4; i++) if (leds[i].b > 0) lit++;
+    TEST_ASSERT_TRUE_MESSAGE(lit < 4, "CHASE on 4 LEDs lit the whole strip; the short-strip fallback is gone");
+}
+
+// FLICKER read neither knob before. Speed now scales the redraw window, so a
+// fast setting repaints more often over the same wall clock.
+void test_flicker_speed_changes_the_redraw_rate(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint32_t timeouts[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+
+    int redraws[2] = {0, 0};
+    const uint8_t speeds[2] = {0, 255};
+    for (int k = 0; k < 2; k++) {
+        rngStateA = RNG_SEED;
+        EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, speeds[k], 128, 1000u, rngA);
+        for (int i = 0; i < TEST_NUM_LEDS; i++) timeouts[i] = 1000u;
+        s.timeouts = timeouts;
+        s.hueTimeout = 1000u + 2000u;
+
+        uint32_t now = 1000u;
+        for (int f = 0; f < 400; f++) {
+            if (renderFlicker(s, now)) redraws[k]++;
+            now += 10;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(redraws[1] > redraws[0],
+                             "FLICKER: speed 255 did not repaint more often than speed 0");
+}
+
+// Intensity is depth: at 0 the strip barely moves, at 255 LEDs drop to black.
+void test_flicker_intensity_changes_the_depth(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint32_t timeouts[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+
+    uint8_t lowest[2] = {255, 255};
+    const uint8_t intensities[2] = {0, 255};
+    for (int k = 0; k < 2; k++) {
+        rngStateA = RNG_SEED;
+        EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 128, intensities[k], 1000u, rngA);
+        for (int i = 0; i < TEST_NUM_LEDS; i++) timeouts[i] = 1000u;
+        s.timeouts = timeouts;
+        s.hueTimeout = 1000u + 2000u;
+
+        uint32_t now = 1000u;
+        for (int f = 0; f < 400; f++) {
+            renderFlicker(s, now);
+            now += 10;
+            for (int i = 0; i < TEST_NUM_LEDS; i++) {
+                if (leds[i].b < lowest[k]) lowest[k] = leds[i].b;
+            }
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(lowest[1] < lowest[0],
+                             "FLICKER: intensity 255 did not dip deeper than intensity 0");
+    TEST_ASSERT_TRUE_MESSAGE(lowest[0] >= 254,
+                             "FLICKER: intensity 0 should be effectively steady");
+}
+
+
+// ===== Issue #0021: NEON, RAIN, TRAIL, STACK =================================
+
+// NEON exists only because FLICKER paints one hue across the whole strip. If
+// both show the same number of hues at once, the mode has no reason to exist.
+void test_neon_shows_several_hues_at_once(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint32_t timeouts[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+
+    int distinct[2] = {0, 0};
+    for (int which = 0; which < 2; which++) {
+        rngStateA = RNG_SEED;
+        EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 128, 128, 1000u, rngA);
+        for (int i = 0; i < TEST_NUM_LEDS; i++) timeouts[i] = 1000u;
+        s.timeouts = timeouts;
+        s.hueTimeout = 1000u + 2000u;
+
+        uint32_t now = 1000u;
+        for (int f = 0; f < 50; f++) {
+            if (which == 0) renderNeon(s, now); else renderFlicker(s, now);
+            now += 10;
+        }
+        bool seen[256] = {false};
+        for (int i = 0; i < TEST_NUM_LEDS; i++) {
+            if (leds[i].b > 0 && !seen[leds[i].r]) { seen[leds[i].r] = true; distinct[which]++; }
+        }
+    }
+    TEST_ASSERT_EQUAL_MESSAGE(GATE_COLOR_COUNT, distinct[0],
+                              "NEON should show the whole palette at once");
+    TEST_ASSERT_EQUAL_MESSAGE(1, distinct[1],
+                              "FLICKER should still show exactly one hue at a time");
+}
+
+// The point of RAIN over multi-run CHASE is that the drops are NOT in step.
+// Equal rates would make it CHASE with extra arithmetic.
+void test_rain_drops_have_independent_rates(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+    rngStateA = RNG_SEED;
+    EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 128, 255, 1000u, rngA);
+
+    uint32_t now = 1000u;
+    for (int f = 0; f < 5; f++) { renderRain(s, now); now += 60; }
+
+    int distinctRates = 0;
+    bool seen[256] = {false};
+    for (int k = 0; k < RAIN_STREAMS; k++) {
+        if (s.rainRate[k] != 0 && !seen[s.rainRate[k]]) { seen[s.rainRate[k]] = true; distinctRates++; }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(distinctRates > 1, "RAIN drops all share one rate; that is CHASE");
+
+    // And the tail really is a gradient, not a flat run.
+    uint8_t base = (uint8_t)(TEST_BRIGHTNESS < TEST_MAX_BRIGHTNESS ? TEST_BRIGHTNESS : TEST_MAX_BRIGHTNESS);
+    int partial = 0;
+    for (int i = 0; i < TEST_NUM_LEDS; i++) if (leds[i].b > 0 && leds[i].b < base) partial++;
+    TEST_ASSERT_TRUE_MESSAGE(partial > 0, "RAIN drops have no fading tail");
+}
+
+// TRAIL's wall is the difference from CHASE: what the run has passed stays
+// lit, dim, instead of going back to black.
+void test_trail_leaves_a_wall(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+    rngStateA = RNG_SEED;
+    EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 128, 128, 1000u, rngA);
+
+    uint32_t now = 1000u;
+    for (int f = 0; f < 30; f++) { renderTrail(s, now); now += 25; }
+
+    uint8_t base = (uint8_t)(TEST_BRIGHTNESS < TEST_MAX_BRIGHTNESS ? TEST_BRIGHTNESS : TEST_MAX_BRIGHTNESS);
+    int wall = 0, head = 0;
+    for (int i = 0; i < TEST_NUM_LEDS; i++) {
+        if (leds[i].b == base) head++;
+        else if (leds[i].b > 0) wall++;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(head > 0, "TRAIL has no bright head");
+    TEST_ASSERT_TRUE_MESSAGE(wall > 0, "TRAIL left no wall behind the head");
+}
+
+// STACK has to actually accumulate, and has to clear rather than jam when the
+// strip fills. Both are the mode; a version that only drops pieces is SPARKLE.
+void test_stack_accumulates_then_clears(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+    rngStateA = RNG_SEED;
+    EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 255, 128, 1000u, rngA);
+
+    uint32_t now = 1000u;
+    int maxSettled = 0;
+    bool grew = false, cleared = false;
+    int prev = 0;
+    for (int f = 0; f < 60000; f++) {
+        renderStack(s, now);
+        now += 5;
+        int settled = (int)s.effectAux;
+        if (settled > prev) grew = true;
+        if (settled == 0 && prev > 0) cleared = true;
+        if (settled > maxSettled) maxSettled = settled;
+        prev = settled;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(grew, "STACK never accumulated");
+    TEST_ASSERT_TRUE_MESSAGE(maxSettled > TEST_NUM_LEDS / 2, "STACK never filled much of the strip");
+    TEST_ASSERT_TRUE_MESSAGE(cleared, "STACK filled up and never cleared");
+}
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
     RUN_TEST(test_theme_green_matches_legacy);
@@ -996,6 +1256,16 @@ int main(int argc, char** argv) {
     RUN_TEST(test_rollover_all_seven);
     RUN_TEST(test_determinism_all_seven);
     RUN_TEST(test_monotonic_chase_scan);
+    RUN_TEST(test_chase_paints_one_run_per_colour);
+    RUN_TEST(test_chase_runs_have_a_tail);
+    RUN_TEST(test_scan_still_has_no_tail);
+    RUN_TEST(test_chase_falls_back_to_one_run_on_a_short_strip);
+    RUN_TEST(test_flicker_speed_changes_the_redraw_rate);
+    RUN_TEST(test_flicker_intensity_changes_the_depth);
+    RUN_TEST(test_neon_shows_several_hues_at_once);
+    RUN_TEST(test_rain_drops_have_independent_rates);
+    RUN_TEST(test_trail_leaves_a_wall);
+    RUN_TEST(test_stack_accumulates_then_clears);
     RUN_TEST(test_monotonic_wipe);
     RUN_TEST(test_monotonic_sparkle);
     RUN_TEST(test_monotonic_pulse);

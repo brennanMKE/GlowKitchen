@@ -28,7 +28,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.0.6"
+#define FIRMWARE_VERSION "0.0.7"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
@@ -1607,6 +1607,21 @@ void loopLED() {
             break;
         case EFFECT_COLORLOOP:
             drew = renderColorloop(fx, nowMs());
+            break;
+        // Issue #0021. NEON is driven by millis() for the same reason FLICKER
+        // is: it shares timeouts[], which the SET_CLOCK_OFFSET harness does
+        // not rebase.
+        case EFFECT_NEON:
+            drew = renderNeon(fx, millis());
+            break;
+        case EFFECT_RAIN:
+            drew = renderRain(fx, nowMs());
+            break;
+        case EFFECT_TRAIL:
+            drew = renderTrail(fx, nowMs());
+            break;
+        case EFFECT_STACK:
+            drew = renderStack(fx, nowMs());
             break;
         case EFFECT_BLEND:
         default:
