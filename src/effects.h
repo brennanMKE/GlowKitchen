@@ -463,6 +463,20 @@ inline bool renderFlicker(EffectState& s, uint32_t now) {
 // speed 0 -> slowMs, 255 -> fastMs, linear. One helper, endpoints documented
 // per renderer below -- no undocumented curve anywhere (issues/0015.md
 // section 4).
+//
+// The slow ends of the six position-stepping renderers (CHASE, WIPE, SCAN,
+// RAIN, TRAIL, STACK) were widened after bench testing on an 11-LED strip:
+// they advance one LED per tick, so a pass takes numLeds ticks and a short
+// strip finishes it in a fraction of the time a long one does. CHASE at its
+// old 40ms floor lapped 11 LEDs in 440ms, which does not read as movement at
+// all -- it reads as flashing. SCAN had already been given this treatment once
+// (25 -> 100) for the same reason on a 10-LED board; this extends it to the
+// rest and goes further, because 100ms was still not enough.
+//
+// Only the slow end moved. fastMs is untouched, so nothing changes for the
+// long strips these were originally tuned against: they run near the top of
+// the range, where the interval is set by fastMs. What the widening buys is
+// somewhere for a short strip to go.
 inline uint16_t speedInterval(uint8_t speed, uint16_t slowMs, uint16_t fastMs) {
     return (uint16_t)(slowMs - (((uint32_t)(slowMs - fastMs) * speed) / 255));
 }
@@ -527,7 +541,8 @@ inline void paintRun(EffectState& s, int start, int width, PaletteColor c, uint8
 //
 // A single-colour palette is exactly the old behaviour plus the tail.
 //
-// Speed: slowMs=40, fastMs=2 (@128 -> 21ms/tick; ~5.0s per lap at 240 LEDs).
+// Speed: slowMs=200, fastMs=2 (see speedInterval() on why the slow end is
+// so far out).
 // Intensity: run width, 1 LED @0 up to a ceiling that is numLeds/4 for one run
 // and three quarters of the run spacing for several, so the runs cannot grow
 // into each other. Tail is half the width, clipped to the gap so a tail never
@@ -537,7 +552,7 @@ inline void paintRun(EffectState& s, int start, int width, PaletteColor c, uint8
 inline bool renderChase(EffectState& s, uint32_t now) {
     if (s.numLeds <= 0 || s.colorCount <= 0 || !s.colors) return false;
     if (!timeReached(now, s.effectTimeout)) return false;
-    s.effectTimeout = now + speedInterval(s.speed, 40, 2);
+    s.effectTimeout = now + speedInterval(s.speed, 200, 2);
 
     uint8_t base = (uint8_t)min(s.maxBrightness, s.brightness);
 
@@ -594,7 +609,7 @@ inline bool renderScan(EffectState& s, uint32_t now) {
     // LEDs even speed=0 crossed the strip in ~250 ms, far too fast to read
     // as a scanner. Long strips get a correspondingly slower sweep -- worth
     // re-checking at 240 LEDs.
-    s.effectTimeout = now + speedInterval(s.speed, 100, 4);
+    s.effectTimeout = now + speedInterval(s.speed, 250, 4);
 
     uint8_t base = (uint8_t)min(s.maxBrightness, s.brightness);
     PaletteColor c = currentPaletteColor(s);
@@ -625,8 +640,8 @@ inline bool renderScan(EffectState& s, uint32_t now) {
     return true;
 }
 
-// WIPE -- colour fills progressively from one end. Speed: slowMs=40,
-// fastMs=2 (@128 -> 21ms/tick; ~5.0s per full wipe at 240 LEDs). Intensity:
+// WIPE -- colour fills progressively from one end. Speed: slowMs=200,
+// fastMs=2. Intensity:
 // contrast of the un-wiped region -- the previous colour at full brightness
 // @0 (a soft recolour of the whole strip) down to black @255 (the classic
 // wipe-onto-black). effectPhase is the front index; no extra state is
@@ -635,7 +650,7 @@ inline bool renderScan(EffectState& s, uint32_t now) {
 inline bool renderWipe(EffectState& s, uint32_t now) {
     if (s.numLeds <= 0 || s.colorCount <= 0 || !s.colors) return false;
     if (!timeReached(now, s.effectTimeout)) return false;
-    s.effectTimeout = now + speedInterval(s.speed, 40, 2);
+    s.effectTimeout = now + speedInterval(s.speed, 200, 2);
 
     uint8_t base = (uint8_t)min(s.maxBrightness, s.brightness);
     PaletteColor c = currentPaletteColor(s);
@@ -838,6 +853,15 @@ inline bool renderColorloop(EffectState& s, uint32_t now) {
 // frozen copy of its pre-refactor self; changing how it indexes the palette
 // would break that promise for every theme.
 //
+// Colours are laid out in blocks of ledsPerColor, not one LED each. Found on a
+// real strip, and the same lesson STACK learned: four different warms sitting
+// one LED apart do not read as four colours behind a diffuser, they read as
+// white. A colour needs a run of LEDs to be that colour, and ledsPerColor is
+// already the device's own answer to how long that run has to be -- it is what
+// BLEND groups themes by, and it is per-device, which no constant here could
+// be. Capped so at least two blocks fit, or a strip with a wide ledsPerColor
+// would come up a single colour and lose the mode entirely.
+//
 // Speed and intensity map exactly as FLICKER's do -- same window, same depth,
 // same identity at 128 -- so a look tuned on one transfers to the other.
 inline bool renderNeon(EffectState& s, uint32_t now) {
@@ -854,12 +878,16 @@ inline bool renderNeon(EffectState& s, uint32_t now) {
 
     uint8_t base = (uint8_t)min(s.maxBrightness, s.brightness);
 
+    int group = s.ledsPerColor > 0 ? s.ledsPerColor : 1;
+    int groupCap = max(1, s.numLeds / 2);
+    if (group > groupCap) group = groupCap;
+
     for (int i = 0; i < s.numLeds; i++) {
         if (timeReached(now, s.timeouts[i])) {
             didChange = true;
             s.timeouts[i] = now + s.rng(loMs, hiMs);
             uint8_t flicker = (uint8_t)s.rng((uint32_t)floorV, 255);
-            PaletteColor c = s.colors[i % s.colorCount];
+            PaletteColor c = s.colors[(i / group) % s.colorCount];
             s.leds[i] = CHSV(c.h, c.s, (uint8_t)(((uint32_t)flicker * base) / 255));
         }
     }
@@ -880,12 +908,12 @@ inline bool renderNeon(EffectState& s, uint32_t now) {
 // tick; without the fraction every drop would round to the same integer speed
 // and the mode would collapse back into CHASE.
 //
-// Speed: slowMs=50, fastMs=3. Intensity: how many of the RAIN_STREAMS drops
+// Speed: slowMs=200, fastMs=3. Intensity: how many of the RAIN_STREAMS drops
 // are in play, 1 @0 to all 8 @255 -- density, as it is in SPARKLE.
 inline bool renderRain(EffectState& s, uint32_t now) {
     if (s.numLeds <= 0 || s.colorCount <= 0 || !s.colors) return false;
     if (!timeReached(now, s.effectTimeout)) return false;
-    s.effectTimeout = now + speedInterval(s.speed, 50, 3);
+    s.effectTimeout = now + speedInterval(s.speed, 200, 3);
 
     uint8_t base = (uint8_t)min(s.maxBrightness, s.brightness);
     int active = 1 + ((uint32_t)s.intensity * (RAIN_STREAMS - 1)) / 255;
@@ -944,12 +972,12 @@ inline bool renderRain(EffectState& s, uint32_t now) {
 // One run per palette colour, spaced like CHASE, so each colour fills its own
 // segment and the strip arrives full just as the lap ends.
 //
-// Speed: slowMs=40, fastMs=2, one LED per tick as CHASE. Intensity: the width
+// Speed: slowMs=200, fastMs=2, one LED per tick as CHASE. Intensity: the width
 // of the bright head, 1 LED @0 to a quarter of the run spacing @255.
 inline bool renderTrail(EffectState& s, uint32_t now) {
     if (s.numLeds <= 0 || s.colorCount <= 0 || !s.colors) return false;
     if (!timeReached(now, s.effectTimeout)) return false;
-    s.effectTimeout = now + speedInterval(s.speed, 40, 2);
+    s.effectTimeout = now + speedInterval(s.speed, 200, 2);
 
     uint8_t base = (uint8_t)min(s.maxBrightness, s.brightness);
 
@@ -997,39 +1025,63 @@ inline bool renderTrail(EffectState& s, uint32_t now) {
 // the entire idea being referenced. This is the smallest renderer that
 // actually has the idea in it.
 //
-// Nothing is stored per LED. The settled region is the last effectAux LEDs,
-// and the colour of a settled LED is derived from how far up the stack it sits
-// -- piece number = distance / pieceLen -- so the strip itself is the record
-// of what landed, and a mode change resets it by zeroing one counter.
+// Piece length comes from ledsPerColor rather than from intensity, and there
+// is a dark gap between settled pieces. Both exist for the same reason, found
+// on a real strip: a one-LED piece next to a differently-coloured one-LED
+// piece does not read as two pieces, it reads as white. Diffusers mix
+// whatever is adjacent, so a colour needs a run of LEDs to be that colour and
+// a dark LED beside it to stay that colour. ledsPerColor is already the
+// device's own answer to "how many LEDs make one visible colour here" -- it is
+// what BLEND groups by -- so it is the right unit, and it is per-device, which
+// a constant could never be.
 //
-// Speed: slowMs=60, fastMs=4, one LED of fall per tick. Intensity: piece
-// length, 1 LED @0 to an eighth of the strip @255.
+// Capped at numLeds/4 so a strip configured with a very wide ledsPerColor
+// still stacks several pieces rather than two.
+//
+// Nothing is stored per LED. effectAux counts settled *pieces*, and a settled
+// LED's colour is derived from which slot it falls in, so the strip itself is
+// the record of what landed and a mode change resets it by zeroing one
+// counter.
+//
+// Speed: slowMs=250, fastMs=4, one LED of fall per tick. Intensity: the dark
+// gap between settled pieces, none @0 up to half a piece @255.
 inline bool renderStack(EffectState& s, uint32_t now) {
     if (s.numLeds <= 0 || s.colorCount <= 0 || !s.colors) return false;
     if (!timeReached(now, s.effectTimeout)) return false;
-    s.effectTimeout = now + speedInterval(s.speed, 60, 4);
+    s.effectTimeout = now + speedInterval(s.speed, 250, 4);
 
     uint8_t base = (uint8_t)min(s.maxBrightness, s.brightness);
 
-    int pieceCeil = max(1, s.numLeds / 8);
-    int pieceLen = 1 + ((uint32_t)s.intensity * (pieceCeil - 1)) / 255;
-    int settled = (int)s.effectAux;
+    int pieceLen = s.ledsPerColor > 0 ? s.ledsPerColor : 1;
+    int pieceCap = max(1, s.numLeds / 4);
+    if (pieceLen > pieceCap) pieceLen = pieceCap;
+
+    int gapCeil = max(1, pieceLen / 2);
+    int gap = ((uint32_t)s.intensity * gapCeil) / 255;
+    int slot = pieceLen + gap;
+
+    int settled = (int)s.effectAux;   // settled pieces, not LEDs
 
     for (int i = 0; i < s.numLeds; i++) s.leds[i] = CHSV(0, 0, 0);
 
-    // The settled stack, growing from the far end back toward the source.
-    for (int d = 0; d < settled && d < s.numLeds; d++) {
-        int idx = s.numLeds - 1 - d;
-        PaletteColor c = s.colors[(d / pieceLen) % s.colorCount];
-        s.leds[idx] = CHSV(c.h, c.s, base);
+    // The settled stack, growing from the far end back toward the source. Each
+    // piece owns a slot; only the first pieceLen LEDs of it are lit, and the
+    // gap after it is what keeps the next colour from touching this one.
+    for (int p = 0; p < settled; p++) {
+        PaletteColor c = s.colors[p % s.colorCount];
+        for (int k = 0; k < pieceLen; k++) {
+            int idx = s.numLeds - 1 - (p * slot + k);
+            if (idx < 0 || idx >= s.numLeds) continue;
+            s.leds[idx] = CHSV(c.h, c.s, base);
+        }
     }
 
     // The piece currently falling, coloured as the one it is about to become.
-    int landing = s.numLeds - settled - pieceLen;
+    int landing = s.numLeds - (settled * slot) - pieceLen;
     int head = (int)s.effectPhase;
     if (head > landing) head = landing;
     if (landing >= 0) {
-        PaletteColor c = s.colors[(settled / pieceLen) % s.colorCount];
+        PaletteColor c = s.colors[settled % s.colorCount];
         for (int k = 0; k < pieceLen; k++) {
             int idx = head + k;
             if (idx >= 0 && idx < s.numLeds) s.leds[idx] = CHSV(c.h, c.s, base);
@@ -1038,9 +1090,9 @@ inline bool renderStack(EffectState& s, uint32_t now) {
 
     if (head >= landing) {
         s.effectPhase = 0;
-        s.effectAux = (uint16_t)(settled + pieceLen);
+        s.effectAux = (uint16_t)(settled + 1);
         // Full: clear and start again, which is the only way this mode ends.
-        if ((int)s.effectAux + pieceLen > s.numLeds) s.effectAux = 0;
+        if (((int)s.effectAux * slot) + pieceLen > s.numLeds) s.effectAux = 0;
     } else {
         s.effectPhase++;
     }

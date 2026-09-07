@@ -308,9 +308,9 @@ struct RendererSpec {
 };
 
 static const RendererSpec RENDERERS[] = {
-    {"CHASE",     renderChase,     40, 2},
-    {"WIPE",      renderWipe,      40, 2},
-    {"SCAN",      renderScan,     100, 4},   // quartered for short strips -- keep in sync with renderScan()
+    {"CHASE",     renderChase,    200, 2},
+    {"WIPE",      renderWipe,     200, 2},
+    {"SCAN",      renderScan,     250, 4},   // quartered for short strips -- keep in sync with renderScan()
     {"SPARKLE",   renderSparkle,   60, 5},
     {"PULSE",     renderPulse,     40, 4},
     {"STROBE",    renderStrobe,   600, 40},
@@ -318,9 +318,9 @@ static const RendererSpec RENDERERS[] = {
     // Issue #0021. NEON is deliberately absent: like FLICKER it is driven by
     // per-LED timeouts[] rather than a single speedInterval() deadline, so the
     // tick-cadence gates below do not describe it. It has its own tests.
-    {"RAIN",      renderRain,      50, 3},
-    {"TRAIL",     renderTrail,     40, 2},
-    {"STACK",     renderStack,     60, 4},
+    {"RAIN",      renderRain,     200, 3},
+    {"TRAIL",     renderTrail,    200, 2},
+    {"STACK",     renderStack,    250, 4},
 };
 static const int NUM_RENDERERS = sizeof(RENDERERS) / sizeof(RENDERERS[0]);
 
@@ -1149,6 +1149,7 @@ void test_neon_shows_several_hues_at_once(void) {
         for (int i = 0; i < TEST_NUM_LEDS; i++) timeouts[i] = 1000u;
         s.timeouts = timeouts;
         s.hueTimeout = 1000u + 2000u;
+        s.ledsPerColor = 8;
 
         uint32_t now = 1000u;
         for (int f = 0; f < 50; f++) {
@@ -1199,8 +1200,11 @@ void test_trail_leaves_a_wall(void) {
     rngStateA = RNG_SEED;
     EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 128, 128, 1000u, rngA);
 
+    // The step has to clear the tick interval: TRAIL's slow end is 200ms, so
+    // at speed 128 a tick is ~101ms and a 25ms step would run seven ticks in
+    // thirty frames -- not enough travel for a wall to exist yet.
     uint32_t now = 1000u;
-    for (int f = 0; f < 30; f++) { renderTrail(s, now); now += 25; }
+    for (int f = 0; f < 40; f++) { renderTrail(s, now); now += 120; }
 
     uint8_t base = (uint8_t)(TEST_BRIGHTNESS < TEST_MAX_BRIGHTNESS ? TEST_BRIGHTNESS : TEST_MAX_BRIGHTNESS);
     int wall = 0, head = 0;
@@ -1219,9 +1223,10 @@ void test_stack_accumulates_then_clears(void) {
     static uint8_t sparkleBuf[TEST_NUM_LEDS];
     rngStateA = RNG_SEED;
     EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 255, 128, 1000u, rngA);
+    s.ledsPerColor = 6;
 
     uint32_t now = 1000u;
-    int maxSettled = 0;
+    int maxLit = 0;
     bool grew = false, cleared = false;
     int prev = 0;
     for (int f = 0; f < 60000; f++) {
@@ -1230,12 +1235,83 @@ void test_stack_accumulates_then_clears(void) {
         int settled = (int)s.effectAux;
         if (settled > prev) grew = true;
         if (settled == 0 && prev > 0) cleared = true;
-        if (settled > maxSettled) maxSettled = settled;
+        int lit = countLit(leds, TEST_NUM_LEDS);
+        if (lit > maxLit) maxLit = lit;
         prev = settled;
     }
     TEST_ASSERT_TRUE_MESSAGE(grew, "STACK never accumulated");
-    TEST_ASSERT_TRUE_MESSAGE(maxSettled > TEST_NUM_LEDS / 2, "STACK never filled much of the strip");
+    TEST_ASSERT_TRUE_MESSAGE(maxLit > TEST_NUM_LEDS / 3, "STACK never filled much of the strip");
     TEST_ASSERT_TRUE_MESSAGE(cleared, "STACK filled up and never cleared");
+}
+
+// The fix for a real strip washing out to white: two settled pieces of
+// different colours must never be adjacent, and each must be wide enough to
+// read as its own colour. Both come from ledsPerColor plus the gap.
+void test_stack_separates_pieces_with_dark_gaps(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+    rngStateA = RNG_SEED;
+    EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 255, 255, 1000u, rngA);
+    s.ledsPerColor = 6;
+
+    uint32_t now = 1000u;
+    for (int f = 0; f < 4000; f++) { renderStack(s, now); now += 5; }
+
+    TEST_ASSERT_TRUE_MESSAGE((int)s.effectAux >= 2, "need at least two settled pieces to test");
+
+    // Walk the settled end: any two lit LEDs of different hues must have at
+    // least one dark LED between them.
+    int lastLitHue = -1, sinceLit = 99;
+    for (int i = TEST_NUM_LEDS - 1; i >= 0; i--) {
+        if (leds[i].b == 0) { sinceLit++; continue; }
+        if (lastLitHue >= 0 && leds[i].r != lastLitHue) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "hue %d touches hue %d at LED %d; they will read as white",
+                     (int)leds[i].r, lastLitHue, i);
+            TEST_ASSERT_TRUE_MESSAGE(sinceLit >= 1, msg);
+        }
+        lastLitHue = leds[i].r;
+        sinceLit = 0;
+    }
+
+    // And a piece is a run, not a single LED.
+    int run = 0, maxRun = 0;
+    for (int i = 0; i < TEST_NUM_LEDS; i++) {
+        if (leds[i].b > 0) { run++; if (run > maxRun) maxRun = run; }
+        else run = 0;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(maxRun >= 6, "settled pieces are shorter than ledsPerColor");
+}
+
+
+// The fix for a strip washing out to white: NEON lays colours out in blocks of
+// ledsPerColor, so a colour occupies a run long enough to read as itself rather
+// than mixing with its neighbour in the diffuser.
+void test_neon_groups_colours_by_leds_per_color(void) {
+    static CRGB leds[TEST_NUM_LEDS];
+    static uint32_t timeouts[TEST_NUM_LEDS];
+    static uint8_t sparkleBuf[TEST_NUM_LEDS];
+    rngStateA = RNG_SEED;
+    EffectState s = makeGateState(leds, sparkleBuf, TEST_NUM_LEDS, 128, 128, 1000u, rngA);
+    for (int i = 0; i < TEST_NUM_LEDS; i++) timeouts[i] = 1000u;
+    s.timeouts = timeouts;
+    s.ledsPerColor = 8;
+
+    uint32_t now = 1000u;
+    for (int f = 0; f < 50; f++) { renderNeon(s, now); now += 10; }
+
+    // Every run of one hue must be at least ledsPerColor long.
+    int run = 0, shortest = TEST_NUM_LEDS, last = -1;
+    for (int i = 0; i < TEST_NUM_LEDS; i++) {
+        if (leds[i].b == 0) continue;
+        if (leds[i].r == last) { run++; continue; }
+        if (last >= 0 && run < shortest) shortest = run;
+        last = leds[i].r;
+        run = 1;
+    }
+    char msg[96];
+    snprintf(msg, sizeof(msg), "shortest colour run is %d LEDs, want at least %d", shortest, 8);
+    TEST_ASSERT_TRUE_MESSAGE(shortest >= 8, msg);
 }
 
 int main(int argc, char** argv) {
@@ -1263,9 +1339,11 @@ int main(int argc, char** argv) {
     RUN_TEST(test_flicker_speed_changes_the_redraw_rate);
     RUN_TEST(test_flicker_intensity_changes_the_depth);
     RUN_TEST(test_neon_shows_several_hues_at_once);
+    RUN_TEST(test_neon_groups_colours_by_leds_per_color);
     RUN_TEST(test_rain_drops_have_independent_rates);
     RUN_TEST(test_trail_leaves_a_wall);
     RUN_TEST(test_stack_accumulates_then_clears);
+    RUN_TEST(test_stack_separates_pieces_with_dark_gaps);
     RUN_TEST(test_monotonic_wipe);
     RUN_TEST(test_monotonic_sparkle);
     RUN_TEST(test_monotonic_pulse);
