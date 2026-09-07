@@ -28,7 +28,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.0.7"
+#define FIRMWARE_VERSION "0.0.8"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
