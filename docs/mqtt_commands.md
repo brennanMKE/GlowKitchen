@@ -51,6 +51,11 @@ All commands should be sent as plain string payloads.
 | `BRIGHT_UP` | Increases brightness by 10 (Max: 225). |
 | `BRIGHT_DOWN` | Decreases brightness by 10 (Min: 75). |
 | `SET_BRIGHTNESS:N` | Sets absolute brightness to N (0-255). |
+| `SWELL` | Runs the late-night swell now (see below). |
+
+#### Late-night swell
+
+On the hour at 7pm, 8pm, 9pm, 10pm and 11pm (local time, synced over NTP), the brightness swells smoothly up to full (225) and back down about once a second for 15 seconds, then settles back to the configured level. The effect and colors keep running untouched, and the configured brightness is never changed. A strip that is switched off stays off. `SWELL` triggers the same swell on demand.
 
 ### Animation Control
 

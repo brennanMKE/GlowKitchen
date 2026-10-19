@@ -12,6 +12,7 @@
 #include <WiFiClientSecure.h>
 #include <time.h>
 #include "time_utils.h"
+#include "late_night_swell.h"
 // effects.h relies on CRGB/CHSV/sin8/min/max already being declared -- see
 // the include-order contract at the top of that header. <FastLED.h> above
 // satisfies it. effects.h itself pulls in themes.h (HueTheme, THEME_NAMES[],
@@ -28,7 +29,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.0.8"
+#define FIRMWARE_VERSION "0.0.9"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
@@ -171,6 +172,10 @@ bool isLocalNetworkUrl(const String& url);
 // Issue #0017: revertFromCustomEffect() (defined near cancelCustomEffect(),
 // ahead of publishState() in file order) needs this forward declaration.
 void publishState();
+// The late-night swell (defined above loopLED()): the MQTT SWELL command
+// starts one and applyMirror() shows through it.
+void startSwell();
+void showLeds();
 
 /// DEVELOPMENT OVERRIDE
 // Set to a valid theme index (0-5) to force that theme, or -1 to use saved preferences
@@ -875,6 +880,10 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         publishState();
     } else if (msgUpper == "STATUS") {
         publishState();
+    } else if (msgUpper == "SWELL") {
+        // The late-night swell on demand, for checking it without waiting for
+        // the hour. Brightness only; a strip that is off stays off.
+        startSwell();
     } else if (msgUpper.startsWith("SET_NUM_LEDS:")) {
         int val = msgUpper.substring(13).toInt();
         if (val > 0 && val <= MAX_LEDS) {
@@ -1425,7 +1434,7 @@ void applyMirror() {
     for (int i = 0; i < half; i++) {
         leds[numLeds - 1 - i] = leds[i];
     }
-    FastLED.show();
+    showLeds();
 }
 
 void setupLED() {
@@ -1522,8 +1531,69 @@ void loopEffectTimeout() {
     revertFromCustomEffect();
 }
 
+// ---- Late-night swell ----
+//
+// On the hour from 7pm on, brightness swells for 15 seconds (see
+// src/late_night_swell.h). The swell is applied only as the scale passed to
+// FastLED.show(): FastLED's own brightness -- the configured value that
+// publishState() reports, the IR buttons step and Preferences saves -- is
+// never touched, and fx.brightness keeps feeding the renderers the configured
+// value, so effects and colours render exactly as they would otherwise.
+
+bool swelling = false;
+uint32_t swellStart = 0;
+
+void startSwell() {
+    swelling = true;
+    swellStart = millis();
+    ESP_LOGI(TAG, "Late-night swell started");
+}
+
+// The brightness to show this frame: the swell's while one runs, otherwise
+// the configured brightness.
+uint8_t outputBrightness() {
+    if (!swelling) return FastLED.getBrightness();
+    return swellBrightness(FastLED.getBrightness(), MAX_BRIGHTNESS, millis() - swellStart);
+}
+
+void showLeds() {
+    FastLED.show(outputBrightness());
+}
+
+// Fires the swell at the top of each late-night hour. Checked once a second,
+// and remembered per hour so the whole of minute 0 triggers it only once.
+void loopLateNightSwell() {
+    static uint32_t checkDeadline = 0;
+    static int lastHour = -1;
+    static int lastYday = -1;
+
+    uint32_t now = millis();
+    if (!timeReached(now, checkDeadline)) return;
+    checkDeadline = now + 1000;
+
+    struct tm local;
+    if (!getLocalTime(&local, 0)) return;          // not synced yet
+    if (local.tm_year + 1900 < 2020) return;       // clock not valid
+    if (local.tm_min != 0 || !lateNightSwellHour(local.tm_hour)) return;
+    if (local.tm_hour == lastHour && local.tm_yday == lastYday) return;
+
+    lastHour = local.tm_hour;
+    lastYday = local.tm_yday;
+    ESP_LOGI(TAG, "Late-night swell for %02d:00", local.tm_hour);
+    startSwell();
+}
+
 void loopLED() {
     unsigned long now = millis();
+
+    // A swell outlives its 15 seconds by one frame, so the strip is shown at
+    // the configured brightness again instead of wherever the last frame left it.
+    bool swellEnded = false;
+    if (swelling && millis() - swellStart >= SWELL_MS) {
+        swelling = false;
+        swellEnded = true;
+        ESP_LOGI(TAG, "Late-night swell ended");
+    }
 
     if (timeReached(now, logTimeout)) {
         ESP_LOGI(TAG, "Heartbeat - uptime: %lu ms, theme: %s, hue index: %d, LEDs: %s", 
@@ -1668,11 +1738,21 @@ void loopLED() {
     }
 #endif
 
-    if (drew) {
+    // Renderers only draw when their effect advances, which for some is every
+    // few hundred ms. A swell has to be shown every frame to stay smooth, so it
+    // re-shows the unchanged pixels at the new brightness in between.
+    static uint32_t swellShowDeadline = 0;
+    bool swellFrame = false;
+    if (swelling && timeReached(millis(), swellShowDeadline)) {
+        swellShowDeadline = millis() + 10;
+        swellFrame = true;
+    }
+
+    if (drew || swellFrame || swellEnded) {
         if (mirrorEnabled && mode != EFFECT_FLICKER) {
             applyMirror();
         } else {
-            FastLED.show();
+            showLeds();
         }
     }
 }
@@ -2011,6 +2091,7 @@ void loop() {
     ensureMqtt();
 
     loopEffectTimeout();  // issue #0017 -- see the placement rationale above the function
+    loopLateNightSwell();
     loopLED();
     loopIR();
     loopOta();

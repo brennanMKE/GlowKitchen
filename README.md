@@ -10,6 +10,7 @@ GlowKitchen is an ESP32-C3 based LED controller designed for kitchen installatio
   - **MQTT Network Control**: Full integration with home automation systems like Home Assistant.
 - **Smart Device Identification**: Automatically generates a unique ID from the hardware MAC address and supports setting a custom device name (e.g., "kitchen", "bar") via MQTT.
 - **Robust MQTT Handling**: Supports case-insensitive commands and persistent subscriptions to both its hardware ID and custom name.
+- **Late-Night Warning**: On the hour from 7pm through 11pm, the brightness swells up and down for 15 seconds, leaving the effect and colors as they are.
 - **Persistence**: Remembers your theme, brightness, device name, and IR settings even after a power loss.
 - **Always-on IR**: IR functionality is always included in the firmware, with a runtime setting to enable or disable processing.
 
@@ -42,6 +43,7 @@ Each device listens on the following topics:
 - `SET_DEVICE_NAME:[name]`: Assign a friendly name to the device.
 - `SET_IR_FLAG:[true/false]`: Enable or disable the IR receiver.
 - `STATUS`: Request the current state of the device.
+- `SWELL`: Run the late-night brightness swell now.
 
 Themes can also be set directly by name: `GREEN`, `RAINBOW`, `PINK_PONY`, `OCEAN`, `SUNSET`, `FOREST`.
 
