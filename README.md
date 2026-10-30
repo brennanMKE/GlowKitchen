@@ -42,6 +42,7 @@ Each device listens on the following topics:
 - `SET_BRIGHTNESS:[0-255]`: Set LED brightness.
 - `SET_DEVICE_NAME:[name]`: Assign a friendly name to the device.
 - `SET_IR_FLAG:[true/false]`: Enable or disable the IR receiver.
+- `SET_MAX_MA:N`: Set the strip's power limit in mA (100-1000, default 500).
 - `STATUS`: Request the current state of the device.
 - `SWELL`: Run the late-night brightness swell now.
 

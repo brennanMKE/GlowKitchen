@@ -29,7 +29,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.0.9"
+#define FIRMWARE_VERSION "0.0.10"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
@@ -219,6 +219,17 @@ bool mirrorEnabled = false;  // Mirror mode for bi-directional strips
 // while a device runs a locally-pushed dev build, which would otherwise be
 // replaced by the released tag within ~15s of its next boot.
 bool otaAutoEnabled = true;
+// FastLED's power limit for the strip, in mA at 5V. Per device, because the
+// strips run off different supplies: 500 is what any USB port guarantees, so
+// it stays the default and a device is only raised once its supply is known.
+// The ESP32's own ~100-300 mA comes on top of this, so leave that margin.
+// The 1 A ceiling is a hard limit: a strip fed through the dev board's 5V pin
+// draws through the board's USB connector and traces, and more than that runs
+// hot whatever the supply behind it can deliver.
+const uint16_t DEFAULT_MAX_MA = 500;
+const uint16_t MIN_MAX_MA = 100;
+const uint16_t MAX_MAX_MA = 1000;
+uint16_t maxMilliamps = DEFAULT_MAX_MA;
 int hueIndex = 0;
 unsigned long logTimeout = 0;
 unsigned long logInterval = 10000;
@@ -418,6 +429,13 @@ void saveMirrorToPreferences() {
     ESP_LOGI(TAG, "Mirror mode saved: %s", mirrorEnabled ? "true" : "false");
 }
 
+void saveMaxMilliampsToPreferences() {
+    preferences.begin("glow_kitchen", false);
+    preferences.putUShort("max_ma", maxMilliamps);
+    preferences.end();
+    ESP_LOGI(TAG, "Power limit saved: %u mA", maxMilliamps);
+}
+
 void saveOtaAutoToPreferences() {
     preferences.begin("glow_kitchen", false);
     preferences.putBool("ota_auto", otaAutoEnabled);
@@ -517,6 +535,9 @@ void loadAllPreferences() {
 
     // Load OTA auto-update flag
     otaAutoEnabled = preferences.getBool("ota_auto", true);
+
+    // Load power limit, clamped in case a stored value predates the bounds
+    maxMilliamps = constrain(preferences.getUShort("max_ma", DEFAULT_MAX_MA), MIN_MAX_MA, MAX_MAX_MA);
 
     // Load LED count - use default if not in preferences
     numLeds = preferences.getInt("num_leds", 240);
@@ -634,6 +655,7 @@ void loadAllPreferences() {
     ESP_LOGI(TAG, "Mirror Mode: %s", mirrorEnabled ? "enabled" : "disabled");
     ESP_LOGI(TAG, "IR Enabled: %s", irEnabled ? "true" : "false");
     ESP_LOGI(TAG, "OTA Auto: %s", otaAutoEnabled ? "true" : "false");
+    ESP_LOGI(TAG, "Power Limit: %u mA", maxMilliamps);
     ESP_LOGI(TAG, "========================");
 }
 
@@ -739,6 +761,7 @@ void publishState() {
     payload += "\"mirrorEnabled\":" + String(mirrorEnabled ? "true" : "false") + ",";
     payload += "\"irEnabled\":" + String(irEnabled ? "true" : "false") + ",";
     payload += "\"otaAuto\":" + String(otaAutoEnabled ? "true" : "false") + ",";
+    payload += "\"maxMilliamps\":" + String(maxMilliamps) + ",";
     payload += "\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"";
 
     // Issue #0017 section 4.3: emitted ONLY when a custom effect is active,
@@ -944,6 +967,19 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
                      DEVICE_NAME.c_str(), oldName.c_str(), newTopic.c_str());
 
             publishState();
+        }
+    } else if (msgUpper.startsWith("SET_MAX_MA:")) {
+        // Out-of-range values are rejected rather than clamped: a typo in a
+        // power limit should change nothing, not something.
+        int val = msgUpper.substring(11).toInt();
+        if (val >= MIN_MAX_MA && val <= MAX_MAX_MA) {
+            maxMilliamps = (uint16_t)val;
+            FastLED.setMaxPowerInVoltsAndMilliamps(5, maxMilliamps);
+            saveMaxMilliampsToPreferences();
+            showLeds();
+            publishState();
+        } else {
+            ESP_LOGW(TAG, "SET_MAX_MA: %d out of range (%u-%u), ignored", val, MIN_MAX_MA, MAX_MAX_MA);
         }
     } else if (msgUpper.startsWith("SET_IR_FLAG:")) {
         String val = msgUpper.substring(12);
@@ -1454,7 +1490,7 @@ void setupLED() {
 
     // Initialize with MAX_LEDS so we can change numLeds at runtime without re-initializing
     FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, MAX_LEDS);
-    FastLED.setMaxPowerInVoltsAndMilliamps(5, 500); // volts, mA
+    FastLED.setMaxPowerInVoltsAndMilliamps(5, maxMilliamps); // volts, mA (SET_MAX_MA)
 
     ESP_LOGI(TAG, "LED setup complete with %d LEDs (max %d)", numLeds, MAX_LEDS);
 

@@ -14,11 +14,19 @@
 // logarithmically, so a modest rise (150 -> 188) is barely visible; a hard
 // on/off pulse is obvious but reads as flashing. A big swing that is smooth
 // is noticed from across a room without ever blinking.
+//
+// The swing has to come from dipping, not rising. FastLED's power limit
+// (setMaxPowerInVoltsAndMilliamps, 500 mA) already holds most strips at their
+// ceiling at ordinary brightness, so it scales a rise to 225 straight back
+// down and only the dip shows. v0.0.9 dipped to 90 at most, which against a
+// capped 180 was barely visible; dipping to an eighth of the configured level
+// reads clearly whatever the cap is doing.
 
 static const int LATE_NIGHT_START_HOUR = 19;       // 7pm; runs through 11pm
 static const uint32_t SWELL_MS = 15000;            // the whole warning
 static const uint32_t SWELL_PERIOD_MS = 1200;      // one up-and-down
-static const uint8_t SWELL_LOW = 90;               // the bottom of a swell, at most
+static const uint8_t SWELL_DEPTH_DIVISOR = 8;      // the bottom of a swell is base / 8
+static const uint8_t SWELL_FLOOR = 2;              // but never dark
 static const uint32_t SWELL_IN_MS = 400;           // easing into the swells
 static const uint32_t SWELL_OUT_MS = 1500;         // and back out to the configured level
 
@@ -49,9 +57,12 @@ static inline uint8_t swellBrightness(uint8_t base, uint8_t peak, uint32_t into)
     if (into >= SWELL_MS || base == 0) return base;
     if (peak < base) peak = base;
 
-    // The bottom of a swell is the configured level, unless that is already
-    // bright -- then dip to SWELL_LOW so a bright strip still visibly moves.
-    uint8_t low = base < SWELL_LOW ? base : SWELL_LOW;
+    // Dip to a fraction of the configured level so the swell shows even when
+    // the power limit flattens the rise; keep a floor so the strip never
+    // blinks off, without lifting a very dim strip above its own level.
+    uint8_t low = base / SWELL_DEPTH_DIVISOR;
+    if (low < SWELL_FLOOR) low = SWELL_FLOOR;
+    if (low > base) low = base;
     // The wave starts at 0, so the first swell rises from the bottom.
     uint8_t wave = swellWave((uint8_t)(((into % SWELL_PERIOD_MS) * 256UL) / SWELL_PERIOD_MS));
     uint8_t target = (uint8_t)(low + ((uint16_t)(peak - low) * wave) / 255);

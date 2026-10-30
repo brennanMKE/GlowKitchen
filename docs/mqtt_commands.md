@@ -52,10 +52,11 @@ All commands should be sent as plain string payloads.
 | `BRIGHT_DOWN` | Decreases brightness by 10 (Min: 75). |
 | `SET_BRIGHTNESS:N` | Sets absolute brightness to N (0-255). |
 | `SWELL` | Runs the late-night swell now (see below). |
+| `SET_MAX_MA:N` | Sets this strip's power limit to N mA at 5V (100-1000, default 500). Saved across reboots and reported as `maxMilliamps` in `STATUS`; out-of-range values are ignored. Set it per device to what its supply can carry, less ~300 mA for the ESP32 itself. |
 
 #### Late-night swell
 
-On the hour at 7pm, 8pm, 9pm, 10pm and 11pm (local time, synced over NTP), the brightness swells smoothly up to full (225) and back down about once a second for 15 seconds, then settles back to the configured level. The effect and colors keep running untouched, and the configured brightness is never changed. A strip that is switched off stays off. `SWELL` triggers the same swell on demand.
+On the hour at 7pm, 8pm, 9pm, 10pm and 11pm (local time, synced over NTP), the brightness swells smoothly between a deep dip (an eighth of the configured level) and full (225) about once a second for 15 seconds, then settles back to the configured level. The dip carries the effect: the power limit (`SET_MAX_MA`, 500 mA by default) often holds a strip at their ceiling, so the rise toward 225 is mostly flattened. The effect and colors keep running untouched, and the configured brightness is never changed. A strip that is switched off stays off. `SWELL` triggers the same swell on demand.
 
 ### Animation Control
 
@@ -188,3 +189,8 @@ The following scripts are available in the `scripts/` folder to simplify common 
 *   **Location**: `kitchen`, `tv`, `desk`, or `all`.
 *   **THEME**: `GREEN`, `RAINBOW`, `PINK_PONY`, `OCEAN_WAVES`, `SUNSET`, or `FOREST`.
 *   Uses the **Retain** flag to keep devices in sync.
+
+### 5. Trigger the Late-Night Swell
+`./scripts/swell.sh [location]`
+*   **Location**: a device name, or `all` (the default).
+*   Sends `SWELL` without the Retain flag, so it fires once and does not replay on reconnect.
