@@ -11,6 +11,7 @@ GlowKitchen is an ESP32-C3 based LED controller designed for kitchen installatio
 - **Smart Device Identification**: Automatically generates a unique ID from the hardware MAC address and supports setting a custom device name (e.g., "kitchen", "bar") via MQTT.
 - **Robust MQTT Handling**: Supports case-insensitive commands and persistent subscriptions to both its hardware ID and custom name.
 - **Late-Night Warning**: On the hour from 7pm through 11pm, the brightness swells up and down for 15 seconds, leaving the effect and colors as they are.
+- **Pulse**: A `PULSE` command flashes the strip once (a dip, a rise to a white-sparked peak, a quick return), the same pulse the GeminiLamps use, then leaves it exactly as it was.
 - **Persistence**: Remembers your theme, brightness, device name, and IR settings even after a power loss.
 - **Always-on IR**: IR functionality is always included in the firmware, with a runtime setting to enable or disable processing.
 
@@ -45,6 +46,7 @@ Each device listens on the following topics:
 - `SET_MAX_MA:N`: Set the strip's power limit in mA (100-1000, default 500).
 - `STATUS`: Request the current state of the device.
 - `SWELL`: Run the late-night brightness swell now.
+- `PULSE`, `PULSE:<ms>`, `PULSE:<ms>:<level>`: Flash the strip once (default 750 ms, 300-5000; level 1-255 peak, 0 or omitted = full), the same pulse as the GeminiLamps. An overlay: nothing is saved, ignored while off, never send it retained. See [docs/mqtt_commands.md](docs/mqtt_commands.md#pulse).
 
 Themes can also be set directly by name: `GREEN`, `RAINBOW`, `PINK_PONY`, `OCEAN`, `SUNSET`, `FOREST`.
 

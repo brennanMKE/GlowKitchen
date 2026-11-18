@@ -58,6 +58,30 @@ All commands should be sent as plain string payloads.
 
 On the hour at 7pm, 8pm, 9pm, 10pm and 11pm (local time, synced over NTP), the brightness swells smoothly between a deep dip (an eighth of the configured level) and full (225) about once a second for 15 seconds, then settles back to the configured level. The dip carries the effect: the power limit (`SET_MAX_MA`, 500 mA by default) often holds a strip at their ceiling, so the rise toward 225 is mostly flattened. The effect and colors keep running untouched, and the configured brightness is never changed. A strip that is switched off stays off. `SWELL` triggers the same swell on demand.
 
+### Pulse
+
+| Payload | Description |
+| :--- | :--- |
+| `PULSE` | A single flash, 750 ms, to the full brightness ceiling (225). |
+| `PULSE:<ms>` | The same flash over `<ms>` milliseconds, clamped to 300–5000 (`0` means the default, 750). |
+| `PULSE:<ms>:<level>` | The same, peaking at brightness `<level>` (1–255, capped at 225). `0` means full. |
+
+Accepted on a device's own topic and on `lights/all/cmd`. The shape matches the GeminiLamps firmware's pulse, so a Pulse button looks the same on every device:
+
+1. **Dip** — down to a fifth (51/255) of the current brightness, over 40% of the lead-in.
+2. **Rise** — back up past it to the peak, accelerating; from 192/255 of the way up, every other LED starts going white.
+3. **Peak** — exactly one frame at the peak brightness with every other LED (0, 2, 4, …) full white.
+4. **Return** — back to the strip's own colours and brightness over the last ~75 ms.
+
+The lead-in is whatever the duration leaves after the peak and return. Behavior notes:
+
+*   **An overlay only.** The theme, the custom effect and the configured brightness are untouched and nothing is saved; when the pulse ends the strip shows exactly what it would have shown. It runs on top of whatever is rendering, including the late-night swell (the dip and return follow the swell's brightness that frame).
+*   **Ignored while the strip is off**, and logged. Switching the strip off mid-pulse ends it.
+*   **Malformed arguments fall back to defaults** instead of rejecting the command: `PULSE:abc` is a 750 ms pulse, `PULSE:900:300` is a 900 ms pulse to full.
+*   A `PULSE` received while one is running restarts it.
+*   **Never retained.** Send it without the Retain flag. A retained `PULSE` is ignored rather than replayed on every reconnect: the broker marks those replays with the retain flag and the device checks it (and, if it ever cannot read the flag, ignores any `PULSE` arriving in the first 3 seconds after connecting, when replays arrive).
+*   `STATUS`/state reports `"pulsing": true|false`. State is published once when a pulse starts and once when it ends, never per frame.
+
 ### Animation Control
 
 | Payload | Description |

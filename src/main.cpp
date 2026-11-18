@@ -13,6 +13,8 @@
 #include <time.h>
 #include "time_utils.h"
 #include "late_night_swell.h"
+#include "pulse.h"
+#include "mqtt_retained.h"
 // effects.h relies on CRGB/CHSV/sin8/min/max already being declared -- see
 // the include-order contract at the top of that header. <FastLED.h> above
 // satisfies it. effects.h itself pulls in themes.h (HueTheme, THEME_NAMES[],
@@ -29,7 +31,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.0.10"
+#define FIRMWARE_VERSION "0.1.0"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
@@ -177,6 +179,15 @@ void publishState();
 void startSwell();
 void showLeds();
 
+// Pulse (src/pulse.h; started by startPulse(), shown by showLeds()). Declared
+// up here because publishState() reports `pulsing`.
+bool pulsing = false;
+uint32_t pulseStart = 0;
+uint32_t pulseMs = PULSE_DEFAULT_MS;
+uint8_t pulseLevel = 0;        // 0 = full (MAX_BRIGHTNESS)
+uint8_t pulsePeakFrames = 0;   // frames shown at the peak so far; see pulseFrame()
+bool startPulse(uint32_t ms, uint8_t level);
+
 /// DEVELOPMENT OVERRIDE
 // Set to a valid theme index (0-5) to force that theme, or -1 to use saved preferences
 // 0=Green, 1=Rainbow, 2=Pink Pony Club, 3=Ocean Waves, 4=Sunset, 5=Forest
@@ -321,6 +332,11 @@ PubSubClient mqtt(wifiClient);
 // Non-blocking reconnect timing
 static const uint32_t MQTT_RETRY_MS = 5000;
 uint32_t mqttRetryAt = 0;
+// When the current MQTT session came up. A PULSE whose retain flag cannot be
+// read (see mqtt_retained.h) is ignored for this long after it, which is when
+// the broker replays retained messages.
+static const uint32_t PULSE_CONNECT_GUARD_MS = 3000;
+uint32_t mqttConnectedAt = 0;
 
 // Theme switching - now simplified to direct button control
 
@@ -762,6 +778,7 @@ void publishState() {
     payload += "\"irEnabled\":" + String(irEnabled ? "true" : "false") + ",";
     payload += "\"otaAuto\":" + String(otaAutoEnabled ? "true" : "false") + ",";
     payload += "\"maxMilliamps\":" + String(maxMilliamps) + ",";
+    payload += "\"pulsing\":" + String(pulsing ? "true" : "false") + ",";
     payload += "\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"";
 
     // Issue #0017 section 4.3: emitted ONLY when a custom effect is active,
@@ -907,6 +924,24 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         // The late-night swell on demand, for checking it without waiting for
         // the hour. Brightness only; a strip that is off stays off.
         startSwell();
+    } else if (msgUpper == PULSE_COMMAND || msgUpper.startsWith("PULSE:")) {
+        // A one-shot flash, never a state: a PULSE left retained on the broker
+        // would otherwise fire again on every reconnect. The broker marks
+        // exactly those replays with RETAIN; when the flag cannot be read,
+        // anything arriving in the replay window just after connecting is
+        // treated as one.
+        MqttRetained retained = mqttMessageRetained(topic, len);
+        bool replayWindow = millis() - mqttConnectedAt < PULSE_CONNECT_GUARD_MS;
+        if (retained == MQTT_RETAINED ||
+            (retained == MQTT_RETAINED_UNKNOWN && replayWindow)) {
+            ESP_LOGW(TAG, "Ignoring retained PULSE on %s (%s) -- publish it without the retain flag",
+                     topic, retained == MQTT_RETAINED ? "retain flag" : "arrived while replaying");
+        } else {
+            uint32_t ms = PULSE_DEFAULT_MS;
+            uint8_t level = 0;
+            parsePulseCommand(msgUpper.c_str(), ms, level);
+            startPulse(ms, level);
+        }
     } else if (msgUpper.startsWith("SET_NUM_LEDS:")) {
         int val = msgUpper.substring(13).toInt();
         if (val > 0 && val <= MAX_LEDS) {
@@ -1405,6 +1440,7 @@ void ensureMqtt() {
     ESP_LOGI(TAG, "MQTT connecting to %s...", MQTT_HOST);
     if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
         ESP_LOGI(TAG, "MQTT connected; subscribing...");
+        mqttConnectedAt = millis();
         mqtt.subscribe("lights/all/cmd");
         
         // Always subscribe to hardware-based ID topic
@@ -1592,8 +1628,67 @@ uint8_t outputBrightness() {
     return swellBrightness(FastLED.getBrightness(), MAX_BRIGHTNESS, millis() - swellStart);
 }
 
+// ---- Pulse ----
+//
+// See src/pulse.h. Like the swell, only what reaches the LEDs changes: the
+// brightness passed to FastLED.show() and, around the peak, the even LEDs of
+// the frame being shown, which are put back the moment it is out. Renderers
+// that build on the previous frame (TRAIL's fade, NEON's flicker) never see
+// the white, and FastLED's own brightness, the theme and the effect are never
+// touched. Nothing is saved.
+
+bool startPulse(uint32_t ms, uint8_t level) {
+    // A switched-off strip stays dark. A pulse is "look, something happened"
+    // on a strip someone is already looking at, not a reason to light one
+    // they turned off.
+    if (!ledsEnabled) {
+        ESP_LOGI(TAG, "Pulse ignored, the strip is off");
+        return false;
+    }
+    pulseMs = pulseClampMs(ms);
+    pulseLevel = level;
+    pulseStart = millis();
+    pulsePeakFrames = 0;
+    bool wasPulsing = pulsing;
+    pulsing = true;
+    ESP_LOGI(TAG, "Pulse: dip, then flash to %u and white, %lu ms",
+             (unsigned)pulsePeakLevel(level, MAX_BRIGHTNESS), (unsigned long)pulseMs);
+    // Once when it starts and once when it ends (loopLED()), never per frame.
+    // A pulse restarted mid-pulse changes nothing a client can see.
+    if (!wasPulsing) publishState();
+    return true;
+}
+
 void showLeds() {
-    FastLED.show(outputBrightness());
+    uint8_t base = outputBrightness();  // the configured level, or the swell's
+    if (!pulsing || !ledsEnabled) {
+        FastLED.show(base);
+        return;
+    }
+
+    PulseFrame frame = pulseFrame(millis() - pulseStart, pulseMs, base,
+                                  pulsePeakLevel(pulseLevel, MAX_BRIGHTNESS), pulsePeakFrames);
+    if (frame.white == 0) {
+        FastLED.show(frame.bright);
+        return;
+    }
+
+    // Every other LED towards white for this one show, then back, so leds[]
+    // holds exactly what the effect drew.
+    static CRGB saved[(MAX_LEDS + 1) / 2];
+    int k = 0;
+    for (int i = 0; i < numLeds; i++) {
+        if (!pulseWhitensLed(i)) continue;
+        saved[k++] = leds[i];
+        leds[i].r = pulseWhitenChannel(leds[i].r, frame.white);
+        leds[i].g = pulseWhitenChannel(leds[i].g, frame.white);
+        leds[i].b = pulseWhitenChannel(leds[i].b, frame.white);
+    }
+    FastLED.show(frame.bright);
+    k = 0;
+    for (int i = 0; i < numLeds; i++) {
+        if (pulseWhitensLed(i)) leds[i] = saved[k++];
+    }
 }
 
 // Fires the swell at the top of each late-night hour. Checked once a second,
@@ -1629,6 +1724,17 @@ void loopLED() {
         swelling = false;
         swellEnded = true;
         ESP_LOGI(TAG, "Late-night swell ended");
+    }
+
+    // Same for a pulse: one more frame at the strip's own brightness and
+    // colours. Switching the strip off ends one early, so it cannot resume
+    // half-way through when the strip comes back on.
+    bool pulseEnded = false;
+    if (pulsing && (!ledsEnabled || millis() - pulseStart >= pulseMs)) {
+        pulsing = false;
+        pulseEnded = true;
+        ESP_LOGI(TAG, "Pulse ended");
+        publishState();
     }
 
     if (timeReached(now, logTimeout)) {
@@ -1775,16 +1881,17 @@ void loopLED() {
 #endif
 
     // Renderers only draw when their effect advances, which for some is every
-    // few hundred ms. A swell has to be shown every frame to stay smooth, so it
-    // re-shows the unchanged pixels at the new brightness in between.
+    // few hundred ms. A swell or a pulse has to be shown every frame to stay
+    // smooth, so it re-shows the unchanged pixels at the new brightness in
+    // between.
     static uint32_t swellShowDeadline = 0;
     bool swellFrame = false;
-    if (swelling && timeReached(millis(), swellShowDeadline)) {
+    if ((swelling || pulsing) && timeReached(millis(), swellShowDeadline)) {
         swellShowDeadline = millis() + 10;
         swellFrame = true;
     }
 
-    if (drew || swellFrame || swellEnded) {
+    if (drew || swellFrame || swellEnded || pulseEnded) {
         if (mirrorEnabled && mode != EFFECT_FLICKER) {
             applyMirror();
         } else {
