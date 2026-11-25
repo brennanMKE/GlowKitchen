@@ -33,7 +33,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.3.0"
+#define FIRMWARE_VERSION "0.3.1"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
@@ -2461,7 +2461,7 @@ void loopOta() {
 //
 //   tap         brightness under half: every strip back up to full.
 //               otherwise: step the work light (look -> soft -> full -> look).
-//   double tap  next look.
+//   double tap  next look, on every strip (as the remote's Forward does).
 //   hold 3 s    every strip down to 20%, and the work light off so this
 //               strip dims too (the work light runs at its own fixed levels).
 //
@@ -2499,10 +2499,14 @@ static void buttonTap() {
     stepWorkLight();
 }
 
+// Every strip, exactly as the remote's Forward button does it: switch here,
+// then broadcast the new theme by name on lights/all/cmd. Our own echo is a
+// no-op (the theme-string handler only acts when the theme differs).
 static void buttonDoubleTap() {
-    ESP_LOGI(TAG, "Button double tap: next look");
+    ESP_LOGI(TAG, "Button double tap: next look, all strips");
     if (!ledsEnabled) ledsEnabled = true;
     switchToNextTheme();  // also ends the work light (lookChanged())
+    broadcastCommand(getThemeMqttCommand(currentTheme));
     publishState();
 }
 

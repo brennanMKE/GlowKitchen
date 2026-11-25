@@ -35,7 +35,7 @@ GlowKitchen is an ESP32-C3 based LED controller designed for kitchen installatio
 | Press | Does |
 |---|---|
 | Tap | Brightness under 50%: every strip to 100%. Otherwise steps the work light: look -> soft white -> full white -> look |
-| Double tap | Next look |
+| Double tap | Next look, on every strip (like the remote's Forward) |
 | Hold 3 s | Every strip to 20%, and the work light off |
 
 A tap acts about 0.3 s after release, while the board waits to see whether a second tap follows. "Every strip" is `lights/all/cmd`, as with the remote's Vol+/Vol-.
