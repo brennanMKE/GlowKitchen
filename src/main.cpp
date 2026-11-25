@@ -33,7 +33,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.2.0"
+#define FIRMWARE_VERSION "0.3.0"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
@@ -180,7 +180,13 @@ void publishState();
 // starts one and applyMirror() shows through it.
 void startSwell();
 void showLeds();
-void requestLookTransition();
+void requestLookTransition(uint32_t ms = 0);
+void lookChanged();
+void showAfterBrightnessChange();
+// Work light (defined with the cross-fade, below); the MQTT handler calls these.
+enum WorkLight : uint8_t;
+void setWorkLight(WorkLight w);
+void stepWorkLight();
 
 // Pulse (src/pulse.h; started by startPulse(), shown by showLeds()). Declared
 // up here because publishState() reports `pulsing`.
@@ -209,6 +215,13 @@ int ledsPerColor = 25;
 
 #define DATA_PIN 4
 
+// Work-light button: one side to this pin, the other to GND. The internal
+// pull-up holds it high, so a press reads LOW. Not GPIO 2, 8 or 9: those are
+// the C3's strapping pins, read at reset, and a button on GPIO 2 left the
+// bench board unable to boot or take a flash. GPIO 5 is free (4 is the LED
+// data line, 3 the IR receiver) and sits next to GPIO 4 on the DevKitM-1.
+#define BUTTON_PIN 5
+
 CRGB leds[MAX_LEDS];
 // uint32_t, not unsigned long (issue #0014): identical on the C3, but
 // correct (32-bit) on a 64-bit native host too -- same lesson as
@@ -232,10 +245,37 @@ uint8_t lookAux[MAX_LEDS];
 static CRGB fadeFrom[MAX_LEDS];
 static CRGB fadeHold[MAX_LEDS];
 static bool fadePending = false;
+static uint32_t fadePendingMs = 0;   // 0 = the synced theme fade (lookFadeMs())
 static bool fadeActive = false;
 static uint32_t fadeStart = 0;
 static uint32_t fadeLen = 0;
 static const uint32_t LOOK_FADE_MS = 2000;
+// The brightness the strip was last shown at, so a fade can ease brightness
+// as well as colour (the work light runs at its own level).
+static uint8_t lastShownBrightness = 0;
+static uint8_t fadeFromBrightness = 0;
+
+// Work light: plain white for working by, stepped by the button on BUTTON_PIN
+// (look -> soft -> full -> look) or set over MQTT with WORK_LIGHT. It sits on
+// top of the theme rather than replacing it, so stepping past full white
+// fades back to whatever look was showing. Not saved: after a power cut the
+// strip comes back on its theme. Any theme or effect command turns it off.
+enum WorkLight : uint8_t { WORK_LIGHT_OFF = 0, WORK_LIGHT_SOFT = 1, WORK_LIGHT_FULL = 2 };
+static WorkLight workLight = WORK_LIGHT_OFF;
+static const char* const WORK_LIGHT_NAMES[] = {"off", "soft", "full"};
+// Soft: warm white, about 3000 K, at about half of the ceiling. Full: every
+// channel at 255, at the brightness ceiling. FastLED's power limit
+// (SET_MAX_MA) still applies on top of both.
+static const CRGB WORK_LIGHT_SOFT_COLOR = CRGB(255, 180, 107);
+static const CRGB WORK_LIGHT_FULL_COLOR = CRGB(255, 255, 255);
+static const uint8_t WORK_LIGHT_SOFT_LEVEL = 110;
+// The button wants an answer you can feel, not a theme change's slow,
+// whole-second-aligned fade: short, still eased at both ends.
+static const uint32_t WORK_LIGHT_FADE_MS = 400;
+// How many times the settled work light is sent before the strip is left
+// alone: more than once, so a single corrupted frame doesn't stick.
+static const uint8_t WORK_LIGHT_SETTLE_SENDS = 3;
+static uint8_t workLightSends = 0;
 
 // Theme System -- HueTheme, THEME_NAMES[] and the six hue arrays moved to
 // src/themes.h (issue #0014) so the native frame-capture test
@@ -551,7 +591,7 @@ void revertFromCustomEffect() {
     // hueIndex = 0 above still matters -- the custom effect may have had 1
     // color and the revert target 8, or vice versa; renderFlicker() indexes
     // colors[hueIndex] unguarded.
-    requestLookTransition();
+    lookChanged();
     publishState();
 }
 
@@ -711,7 +751,7 @@ void switchToNextTheme() {
     ESP_LOGI(TAG, "Switched from %s to %s theme", THEME_NAMES[oldTheme], THEME_NAMES[currentTheme]);
 
     // Cross-fade into the new look (loopLED()).
-    requestLookTransition();
+    lookChanged();
 }
 
 void switchToPreviousTheme() {
@@ -725,7 +765,7 @@ void switchToPreviousTheme() {
     ESP_LOGI(TAG, "Switched from %s to %s theme", THEME_NAMES[oldTheme], THEME_NAMES[currentTheme]);
 
     // Cross-fade into the new look (loopLED()).
-    requestLookTransition();
+    lookChanged();
 }
 
 // LED Control Functions
@@ -733,7 +773,7 @@ void increaseBrightness() {
     int currentBrightness = FastLED.getBrightness();
     int newBrightness = min(MAX_BRIGHTNESS, currentBrightness + 10);
     FastLED.setBrightness(newBrightness);
-    FastLED.show();
+    showAfterBrightnessChange();
     saveBrightnessToPreferences();
     ESP_LOGI(TAG, "Brightness increased to %d (max: %d)", newBrightness, MAX_BRIGHTNESS);
 }
@@ -742,7 +782,7 @@ void decreaseBrightness() {
     int currentBrightness = FastLED.getBrightness();
     int newBrightness = max(MIN_BRIGHTNESS, currentBrightness - 10);
     FastLED.setBrightness(newBrightness);
-    FastLED.show();
+    showAfterBrightnessChange();
     saveBrightnessToPreferences();
     ESP_LOGI(TAG, "Brightness decreased to %d (min: 10)", newBrightness);
 }
@@ -792,6 +832,7 @@ void publishState() {
     payload += "\"otaAuto\":" + String(otaAutoEnabled ? "true" : "false") + ",";
     payload += "\"maxMilliamps\":" + String(maxMilliamps) + ",";
     payload += "\"pulsing\":" + String(pulsing ? "true" : "false") + ",";
+    payload += "\"workLight\":\"" + String(WORK_LIGHT_NAMES[workLight]) + "\",";
     payload += "\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"";
 
     // Issue #0017 section 4.3: emitted ONLY when a custom effect is active,
@@ -933,6 +974,15 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         publishState();
     } else if (msgUpper == "STATUS") {
         publishState();
+    } else if (msgUpper == "WORK_LIGHT" || msgUpper.startsWith("WORK_LIGHT:")) {
+        // WORK_LIGHT steps like the button; WORK_LIGHT:OFF|SOFT|FULL sets it.
+        String arg = msgUpper.length() > 11 ? msgUpper.substring(11) : String("");
+        if (arg == "")          stepWorkLight();
+        else if (arg == "OFF")  setWorkLight(WORK_LIGHT_OFF);
+        else if (arg == "SOFT") setWorkLight(WORK_LIGHT_SOFT);
+        else if (arg == "FULL") setWorkLight(WORK_LIGHT_FULL);
+        else ESP_LOGI(TAG, "WORK_LIGHT: unknown argument '%s'", arg.c_str());
+        publishState();
     } else if (msgUpper == "SWELL") {
         // The late-night swell on demand, for checking it without waiting for
         // the hour. Brightness only; a strip that is off stays off.
@@ -976,7 +1026,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
         if (val >= 0 && val <= 255) {
             if (FastLED.getBrightness() != val) {
                 FastLED.setBrightness(val);
-                FastLED.show();
+                showAfterBrightnessChange();
                 saveBrightnessToPreferences();
                 publishState();
             }
@@ -1233,7 +1283,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
 
             // Cross-fade into the effect -- parity with the theme-switch
             // paths (switchToNextTheme(), the theme-string dispatch below).
-            requestLookTransition();
+            lookChanged();
 
             ESP_LOGI(TAG, "SET_EFFECT applied: mode=%s colors=%u speed=%u intensity=%u timeoutSec=%lu",
                      EFFECT_MODE_NAMES[customEffect.mode], customEffect.colorCount,
@@ -1323,7 +1373,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
                 if (!ledsEnabled) ledsEnabled = true; // Use direct flag to avoid toggle logic
                 
                 // Cross-fade into the new look (loopLED()).
-                requestLookTransition();
+                lookChanged();
                 publishState();
             }
             return;
@@ -1535,9 +1585,48 @@ static uint32_t lookFadeMs() {
 
 // Called wherever the look changes: theme, SET_EFFECT, revert, switching on.
 // The fade itself starts on loopLED()'s next pass, so a burst of changes in
-// one MQTT callback still starts from what was last shown.
-void requestLookTransition() {
+// one MQTT callback still starts from what was last shown. `ms` = 0 is the
+// synced theme fade; anything else is a fixed length (the work light's).
+void requestLookTransition(uint32_t ms) {
     fadePending = true;
+    fadePendingMs = ms;
+}
+
+// After a brightness change. The looks redraw within a frame anyway; the
+// settled work light sends nothing, so it is re-armed to send its few frames
+// rather than shown directly here -- a raw FastLED.show() goes out at
+// FastLED's own brightness and with dithering, not at the work light's level.
+void showAfterBrightnessChange() {
+    if (workLight != WORK_LIGHT_OFF) {
+        workLightSends = WORK_LIGHT_SETTLE_SENDS;
+        return;
+    }
+    showLeds();
+}
+
+// A theme or effect was chosen: that ends the work light, then fades.
+void lookChanged() {
+    if (workLight != WORK_LIGHT_OFF) {
+        workLight = WORK_LIGHT_OFF;
+        ESP_LOGI(TAG, "Work light off (look changed)");
+    }
+    requestLookTransition();
+}
+
+void setWorkLight(WorkLight w) {
+    if (!ledsEnabled) ledsEnabled = true;  // a work light that stays dark is no use
+    if (w == workLight) return;
+    workLight = w;
+    ESP_LOGI(TAG, "Work light: %s", WORK_LIGHT_NAMES[workLight]);
+    requestLookTransition(WORK_LIGHT_FADE_MS);
+    publishState();
+}
+
+// The button's step: look -> soft -> full -> look. A strip that is off comes
+// on in soft white.
+void stepWorkLight() {
+    if (!ledsEnabled) { setWorkLight(WORK_LIGHT_SOFT); return; }
+    setWorkLight((WorkLight)((workLight + 1) % 3));
 }
 
 // Current fade progress, eased, 0-255.
@@ -1666,9 +1755,23 @@ void startSwell() {
 
 // The brightness to show this frame: the swell's while one runs, otherwise
 // the configured brightness.
+// The level the strip is set to: its configured brightness, or the work
+// light's own.
+static uint8_t targetBrightness() {
+    switch (workLight) {
+        case WORK_LIGHT_FULL: return MAX_BRIGHTNESS;
+        case WORK_LIGHT_SOFT: return WORK_LIGHT_SOFT_LEVEL < MAX_BRIGHTNESS ? WORK_LIGHT_SOFT_LEVEL : MAX_BRIGHTNESS;
+        default:              return FastLED.getBrightness();
+    }
+}
+
 uint8_t outputBrightness() {
-    if (!swelling) return FastLED.getBrightness();
-    return swellBrightness(FastLED.getBrightness(), MAX_BRIGHTNESS, millis() - swellStart);
+    uint8_t base = targetBrightness();
+    // During a cross-fade, ease from the level the strip was showing, so
+    // switching to or from the work light doesn't jump in brightness.
+    if (fadeActive) base = fxLerp8(fadeFromBrightness, base, fadeFraction(millis()));
+    if (!swelling) return base;
+    return swellBrightness(base, MAX_BRIGHTNESS, millis() - swellStart);
 }
 
 // ---- Pulse ----
@@ -1704,6 +1807,14 @@ bool startPulse(uint32_t ms, uint8_t level) {
 
 void showLeds() {
     uint8_t base = outputBrightness();  // the configured level, or the swell's
+    lastShownBrightness = base;
+    // FastLED's temporal dithering fakes in-between levels below brightness
+    // 255 by alternating each LED between two values on successive shows. At
+    // the looks' 50 fps that blends into a smooth level; on the work light,
+    // which is shown every 100 ms, it was a visible flicker on solid white --
+    // the one thing a light for seeing small components must not do. Off for
+    // the work light, so every frame is identical; on for everything else.
+    FastLED.setDither(workLight != WORK_LIGHT_OFF ? DISABLE_DITHER : BINARY_DITHER);
     if (!pulsing || !ledsEnabled) {
         FastLED.show(base);
         return;
@@ -1840,7 +1951,8 @@ void loopLED() {
         // rather than fading toward leftovers of the old one.
         for (int i = 0; i < numLeds; i++) timeouts[i] = t;
         fadeStart = t;
-        fadeLen = lookFadeMs();
+        fadeLen = fadePendingMs ? fadePendingMs : lookFadeMs();
+        fadeFromBrightness = lastShownBrightness;
         fadeActive = true;
         ESP_LOGI(TAG, "Look fade over %lu ms", (unsigned long)fadeLen);
     }
@@ -1856,7 +1968,24 @@ void loopLED() {
     fx.maxBrightness = MAX_BRIGHTNESS;
 
     bool drew;
-    switch (mode) {
+    static uint32_t workLightDeadline = 0;
+    if (workLight != WORK_LIGHT_OFF) {
+        // The colour is painted into leds[] every pass (cheap), so a fade or a
+        // change of numLeds always has it, but it is only SENT a few times once
+        // it settles, then not at all. A WS2812 holds the last frame it latched,
+        // and every resend is a chance for a corrupted one -- WiFi activity
+        // stretching a bit, or a 3.3 V data line at the edge of what a 5 V strip
+        // reads. On a moving look a bad frame is lost in the motion; on solid
+        // white, resending ten times a second showed as a constant flicker.
+        fill_solid(leds, numLeds, workLight == WORK_LIGHT_FULL ? WORK_LIGHT_FULL_COLOR
+                                                                : WORK_LIGHT_SOFT_COLOR);
+        drew = false;
+        if (workLightSends > 0 && !fadeActive && timeReached(millis(), workLightDeadline)) {
+            workLightDeadline = millis() + 60;
+            workLightSends--;
+            drew = true;
+        }
+    } else switch (mode) {
         case EFFECT_FLICKER:
             // Driven by millis(), not nowMs() -- as before this refactor.
             // Unifying it with the blend path would strand flicker's
@@ -1988,6 +2117,7 @@ void loopLED() {
         if (mirrorEnabled && mode != EFFECT_FLICKER) mirrorLeds();
         uint8_t f = fadeActive ? fadeFraction(millis()) : 255;
         if (f == 255) {
+            if (fadeActive && workLight != WORK_LIGHT_OFF) workLightSends = WORK_LIGHT_SETTLE_SENDS;
             fadeActive = false;
             showLeds();
         } else {
@@ -2326,6 +2456,110 @@ void loopOta() {
 
 // ---- Setup / Loop ----
 
+// ---- Work-light button ----
+// Polled and debounced over 30 ms.
+//
+//   tap         brightness under half: every strip back up to full.
+//               otherwise: step the work light (look -> soft -> full -> look).
+//   double tap  next look.
+//   hold 3 s    every strip down to 20%, and the work light off so this
+//               strip dims too (the work light runs at its own fixed levels).
+//
+// A tap is decided on release, so a hold never also counts as one, and only
+// after DOUBLE_TAP_MS with no second press, so a double tap never also steps
+// the work light. That wait is the price of having both.
+//
+// "Every strip" is lights/all/cmd, applied here first and then broadcast, the
+// way the remote's Vol+/Vol- already do it. Percentages are of 255, so 100%
+// is the firmware's ceiling, MAX_BRIGHTNESS.
+static const uint32_t BUTTON_DEBOUNCE_MS = 30;
+static const uint32_t DOUBLE_TAP_MS = 300;
+static const uint32_t HOLD_MS = 3000;
+static const uint8_t HOLD_BRIGHTNESS = 51;        // 20% of 255
+static const uint8_t BRIGHTEN_BELOW = 128;        // 50% of 255
+
+static void setAllBrightness(int level) {
+    if (level > MAX_BRIGHTNESS) level = MAX_BRIGHTNESS;
+    if (level < 0) level = 0;
+    FastLED.setBrightness((uint8_t)level);
+    saveBrightnessToPreferences();
+    String cmd = "SET_BRIGHTNESS:" + String(level);
+    broadcastCommand(cmd.c_str());
+    publishState();
+}
+
+static void buttonTap() {
+    if (ledsEnabled && FastLED.getBrightness() < BRIGHTEN_BELOW) {
+        ESP_LOGI(TAG, "Button tap: brightness %u is under half, all strips to full",
+                 FastLED.getBrightness());
+        setAllBrightness(MAX_BRIGHTNESS);
+        return;
+    }
+    ESP_LOGI(TAG, "Button tap: step work light");
+    stepWorkLight();
+}
+
+static void buttonDoubleTap() {
+    ESP_LOGI(TAG, "Button double tap: next look");
+    if (!ledsEnabled) ledsEnabled = true;
+    switchToNextTheme();  // also ends the work light (lookChanged())
+    publishState();
+}
+
+static void buttonHold() {
+    ESP_LOGI(TAG, "Button held: all strips to 20%%");
+    if (workLight != WORK_LIGHT_OFF) {
+        workLight = WORK_LIGHT_OFF;
+        requestLookTransition(WORK_LIGHT_FADE_MS);
+    }
+    setAllBrightness(HOLD_BRIGHTNESS);
+}
+
+void setupButton() {
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    ESP_LOGI(TAG, "Work-light button on GPIO %d", BUTTON_PIN);
+}
+
+void loopButton() {
+    static int stable = HIGH, lastRaw = HIGH;
+    static uint32_t changedAt = 0;
+    static uint32_t pressedAt = 0;
+    static bool holdFired = false;
+    static bool tapPending = false;
+    static uint32_t releasedAt = 0;
+
+    int raw = digitalRead(BUTTON_PIN);
+    uint32_t now = millis();
+    if (raw != lastRaw) {
+        lastRaw = raw;
+        changedAt = now;
+    }
+    if (raw != stable && now - changedAt >= BUTTON_DEBOUNCE_MS) {
+        stable = raw;
+        if (stable == LOW) {                       // pressed
+            pressedAt = now;
+            holdFired = false;
+            if (tapPending && now - releasedAt <= DOUBLE_TAP_MS) {
+                tapPending = false;
+                holdFired = true;                  // this press is spent; its release is not a tap
+                buttonDoubleTap();
+            }
+        } else if (!holdFired) {                   // released after a short press
+            tapPending = true;
+            releasedAt = now;
+        }
+    }
+    if (stable == LOW && !holdFired && now - pressedAt >= HOLD_MS) {
+        holdFired = true;
+        tapPending = false;
+        buttonHold();
+    }
+    if (tapPending && stable == HIGH && now - releasedAt > DOUBLE_TAP_MS) {
+        tapPending = false;
+        buttonTap();
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     // Issue #0020: the console is the C3's native USB CDC (ARDUINO_USB_CDC_ON_BOOT),
@@ -2342,6 +2576,7 @@ void setup() {
 
     setupLED();
     setupIR();
+    setupButton();
 
     ensureWifi();
 }
@@ -2352,6 +2587,7 @@ void loop() {
 
     loopEffectTimeout();  // issue #0017 -- see the placement rationale above the function
     loopLateNightSwell();
+    loopButton();
     loopLED();
     loopIR();
     loopOta();

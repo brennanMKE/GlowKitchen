@@ -28,6 +28,19 @@ GlowKitchen is an ESP32-C3 based LED controller designed for kitchen installatio
 - **Microcontroller**: ESP32-C3
 - **LEDs**: WS2812B (addressable) on DATA_PIN 4.
 - **IR Receiver**: Connected to GPIO 3.
+- **Button (optional)**: between GPIO 5 and GND; the internal pull-up is used, so no resistor. Don't use GPIO 2, 8 or 9 -- they are the C3's strapping pins, and a button on GPIO 2 left a board unable to boot or take a flash.
+
+### Button
+
+| Press | Does |
+|---|---|
+| Tap | Brightness under 50%: every strip to 100%. Otherwise steps the work light: look -> soft white -> full white -> look |
+| Double tap | Next look |
+| Hold 3 s | Every strip to 20%, and the work light off |
+
+A tap acts about 0.3 s after release, while the board waits to see whether a second tap follows. "Every strip" is `lights/all/cmd`, as with the remote's Vol+/Vol-.
+
+The **work light** is solid white for close work: soft is a slightly warm white at brightness 110, full is plain white at the ceiling (225). It fades in over 400 ms, is sent a few times once settled and then not again, so nothing on the data line can make it flicker. It isn't saved -- a power cut brings the strip back on its theme -- and any theme or effect command ends it. Over MQTT: `WORK_LIGHT` steps it like a tap, `WORK_LIGHT:SOFT|FULL|OFF` sets it, and state reports `"workLight"`.
 
 ## Configuration
 
