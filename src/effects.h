@@ -47,8 +47,19 @@ enum EffectMode {
     EFFECT_NEON = 9,
     EFFECT_RAIN = 10,
     EFFECT_TRAIL = 11,
-    EFFECT_STACK = 12
+    EFFECT_STACK = 12,
+    // Living looks: the six built-in themes' own renderers (src/looks.h).
+    // Appended for the same NVS reason as #0021's four.
+    EFFECT_CANDLE = 13,
+    EFFECT_FLOW = 14,
+    EFFECT_GLITTER = 15,
+    EFFECT_WAVES = 16,
+    EFFECT_EMBER = 17,
+    EFFECT_CANOPY = 18
 };
+
+// The highest EffectMode value, for range checks that must grow with the enum.
+static const EffectMode EFFECT_LAST_MODE = EFFECT_CANOPY;
 
 // Issue #0016: the wire/name form of EffectMode, for SET_EFFECT's "mode"
 // field and NVS-mismatch log lines. `static const char* const`, not a bare
@@ -59,10 +70,11 @@ enum EffectMode {
 static const char* const EFFECT_MODE_NAMES[] = {
     "BLEND", "FLICKER", "CHASE", "WIPE", "SCAN",
     "SPARKLE", "PULSE", "STROBE", "COLORLOOP",
-    "NEON", "RAIN", "TRAIL", "STACK"
+    "NEON", "RAIN", "TRAIL", "STACK",
+    "CANDLE", "FLOW", "GLITTER", "WAVES", "EMBER", "CANOPY"
 };
 static_assert(sizeof(EFFECT_MODE_NAMES) / sizeof(EFFECT_MODE_NAMES[0])
-              == EFFECT_STACK + 1,
+              == EFFECT_LAST_MODE + 1,
               "one name per EffectMode");
 
 #define MAX_CUSTOM_COLORS 8
@@ -128,23 +140,28 @@ inline void resetCustomEffect(CustomEffectConfig& c) {
 // THEME_COUNT.
 inline bool customEffectIsValid(const CustomEffectConfig& c) {
     if (c.colorCount < 1 || c.colorCount > MAX_CUSTOM_COLORS) return false;
-    if (c.mode > EFFECT_COLORLOOP) return false;
+    // EFFECT_LAST_MODE, not a literal: this was `> EFFECT_COLORLOOP` and was
+    // never widened when #0021 appended NEON/RAIN/TRAIL/STACK, so a custom
+    // effect in any of those four was accepted over MQTT and then thrown
+    // away on the next boot's NVS load.
+    if (c.mode > EFFECT_LAST_MODE) return false;
     if (c.revertTheme >= CYCLEABLE_THEME_COUNT) return false;
     if (c.timeoutMs > 28800000UL) return false;
     return true;
 }
 
 // Maps each of the 6 cycleable themes to the EffectMode that renders it.
-// Green -> FLICKER (candle effect); everything else -> BLEND (gradient
-// scroll). THEME_CUSTOM is deliberately absent from this table -- its mode
+// Each built-in theme has its own living renderer in src/looks.h. BLEND and
+// FLICKER, which drew all six before, stay unchanged and reachable through
+// SET_EFFECT. THEME_CUSTOM is deliberately absent from this table -- its mode
 // comes from customEffect.mode instead, via getCurrentEffectMode() below.
 static const EffectMode BUILTIN_EFFECT_MODE[CYCLEABLE_THEME_COUNT] = {
-    EFFECT_FLICKER,  // THEME_GREEN
-    EFFECT_BLEND,    // THEME_RAINBOW
-    EFFECT_BLEND,    // THEME_PINK_PONY
-    EFFECT_BLEND,    // THEME_OCEAN_WAVES
-    EFFECT_BLEND,    // THEME_SUNSET
-    EFFECT_BLEND     // THEME_FOREST
+    EFFECT_CANDLE,   // THEME_GREEN
+    EFFECT_FLOW,     // THEME_RAINBOW
+    EFFECT_GLITTER,  // THEME_PINK_PONY
+    EFFECT_WAVES,    // THEME_OCEAN_WAVES
+    EFFECT_EMBER,    // THEME_SUNSET
+    EFFECT_CANOPY    // THEME_FOREST
 };
 static_assert(sizeof(BUILTIN_EFFECT_MODE) / sizeof(BUILTIN_EFFECT_MODE[0])
               == CYCLEABLE_THEME_COUNT,
@@ -286,6 +303,18 @@ struct EffectState {
     uint16_t   rainPos[RAIN_STREAMS];   // head position in 1/16 LED
     uint8_t    rainRate[RAIN_STREAMS];  // advance per tick, 1/16 LED, 0 = unseeded
     uint8_t    rainLen[RAIN_STREAMS];   // tail length in LEDs
+
+    // ---- Living looks (src/looks.h). Three per-LED byte arrays, owned by
+    // main.cpp like timeouts[]: a level each LED is easing from, the level it
+    // is easing toward, and one renderer-specific byte (hue jitter, sparkle
+    // colour). animT and colorT are look clocks in milliseconds, advanced by
+    // speed (128 = real time); colorT only runs while colorChangeEnabled.
+    uint8_t*   ledLevel;
+    uint8_t*   ledTarget;
+    uint8_t*   ledAux;
+    uint32_t   animT, colorT;
+    uint32_t   animFrac;               // sub-millisecond carry, 1/256 ms
+    uint32_t   lastFrameMs;            // 0 = no frame yet
 };
 
 // Resets ONLY the #0015 fields. Must never touch blendTimeout, rotateTimeout,
@@ -307,6 +336,15 @@ inline void resetEffectState(EffectState& s, uint32_t now) {
         s.rainLen[i] = 0;
     }
     if (s.sparkleVal) for (int i = 0; i < s.numLeds; i++) s.sparkleVal[i] = 0;
+    // Living looks. animT/colorT are left running: a look that comes back
+    // picks up where its colours were rather than restarting from entry 0.
+    s.lastFrameMs = 0;
+    s.animFrac = 0;
+    for (int i = 0; i < s.numLeds; i++) {
+        if (s.ledLevel)  s.ledLevel[i] = 0;
+        if (s.ledTarget) s.ledTarget[i] = 0;
+        if (s.ledAux)    s.ledAux[i] = 0;
+    }
 }
 
 // renderBlend() -- extracted from main.cpp's slowBlend() (pre-#0014 form).

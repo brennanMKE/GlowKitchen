@@ -4,7 +4,15 @@ GlowKitchen is an ESP32-C3 based LED controller designed for kitchen installatio
 
 ## Features
 
-- **Dynamic Visual Themes**: Includes Green (flicker), Rainbow, Pink Pony Club, Ocean Waves, Sunset, and Forest.
+- **Living Themes**: each built-in theme has its own animation (`src/looks.h`), and changing theme cross-fades over about 2 s, ending on a whole second so strips told together finish together.
+  - **Green**: soft candle (`CANDLE`): eased per-LED flicker with a little hue jitter
+  - **Rainbow**: travelling gradient with a brightness ripple (`FLOW`)
+  - **Pink Pony Club**: pink gradient with white and hot-pink glitter (`GLITTER`)
+  - **Ocean Waves**: interfering swells with pale foam on the crests (`WAVES`)
+  - **Sunset**: embers whose colour follows their heat, purple to gold (`EMBER`)
+  - **Forest**: drifting light and shade with warm sun flecks (`CANOPY`)
+
+  The mode names also work in `SET_EFFECT`, where `speed` and `intensity` (128 = the theme's own setting) tune them.
 - **Dual Control Methods**:
   - **IR Remote**: Supports standard NEC protocol remotes for direct control (brightness, theme switching, power, auto-color change).
   - **MQTT Network Control**: Full integration with home automation systems like Home Assistant.

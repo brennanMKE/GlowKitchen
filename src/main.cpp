@@ -11,6 +11,7 @@
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
+#include <sys/time.h>     // gettimeofday(), for whole-second look fades
 #include "time_utils.h"
 #include "late_night_swell.h"
 #include "pulse.h"
@@ -20,6 +21,7 @@
 // satisfies it. effects.h itself pulls in themes.h (HueTheme, THEME_NAMES[],
 // the six hue arrays) and time_utils.h (already included directly above).
 #include "effects.h"
+#include "looks.h"         // the built-in themes' living renderers + cross-fade
 #include "theme_command.h"
 // effect_parse.h (issue #0016): the hand-rolled SET_EFFECT payload parser
 // and the NVS load decision. Include-order contract already satisfied by
@@ -31,7 +33,7 @@
 
 static const char *TAG = "MAIN";
 
-#define FIRMWARE_VERSION "0.1.0"
+#define FIRMWARE_VERSION "0.2.0"
 
 // Greppable marker so tooling can read the version straight from firmware.bin
 // (see scripts/firmware_info.sh). __attribute__((used)) alone is not enough on
@@ -178,6 +180,7 @@ void publishState();
 // starts one and applyMirror() shows through it.
 void startSwell();
 void showLeds();
+void requestLookTransition();
 
 // Pulse (src/pulse.h; started by startPulse(), shown by showLeds()). Declared
 // up here because publishState() reports `pulsing`.
@@ -214,6 +217,25 @@ uint32_t timeouts[MAX_LEDS];
 // SPARKLE's per-LED brightness array (issue #0015) -- wired to fx.sparkleVal
 // in setupLED(). ~500 bytes SRAM at MAX_LEDS.
 uint8_t sparkleValues[MAX_LEDS];
+// The living looks' per-LED state (src/looks.h), wired to fx in setupLED().
+// 1.5 KB at MAX_LEDS.
+uint8_t lookLevel[MAX_LEDS];
+uint8_t lookTarget[MAX_LEDS];
+uint8_t lookAux[MAX_LEDS];
+
+// Cross-fade between looks. A change of theme or effect no longer repaints the
+// strip on the spot: it asks for a transition, and loopLED() eases from the
+// last frame it showed into the new look's live frames. fadeFrom holds that
+// last frame. fadeHold is scratch for the one show that displays a blend, so
+// leds[] still holds exactly what the renderer drew (FLICKER, NEON and
+// SPARKLE only repaint some LEDs each frame and rely on that).
+static CRGB fadeFrom[MAX_LEDS];
+static CRGB fadeHold[MAX_LEDS];
+static bool fadePending = false;
+static bool fadeActive = false;
+static uint32_t fadeStart = 0;
+static uint32_t fadeLen = 0;
+static const uint32_t LOOK_FADE_MS = 2000;
 
 // Theme System -- HueTheme, THEME_NAMES[] and the six hue arrays moved to
 // src/themes.h (issue #0014) so the native frame-capture test
@@ -525,14 +547,11 @@ void revertFromCustomEffect() {
     saveThemeToPreferences();
     saveCustomEffectToPreferences();  // also writes fx_end = 0
 
-    // Force immediate visual update, mirroring the theme-string handler.
-    // hueIndex = 0 before reading the palette matters -- the custom effect
-    // may have had 1 color and the revert target 8, or vice versa;
-    // renderFlicker() indexes colors[hueIndex] unguarded.
-    const PaletteColor* currentColors = getCurrentColorArray();
-    PaletteColor newColor = currentColors[hueIndex];
-    fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
-    FastLED.show();
+    // Cross-fade into the reverted look, as every look change does.
+    // hueIndex = 0 above still matters -- the custom effect may have had 1
+    // color and the revert target 8, or vice versa; renderFlicker() indexes
+    // colors[hueIndex] unguarded.
+    requestLookTransition();
     publishState();
 }
 
@@ -691,11 +710,8 @@ void switchToNextTheme() {
     saveThemeToPreferences();
     ESP_LOGI(TAG, "Switched from %s to %s theme", THEME_NAMES[oldTheme], THEME_NAMES[currentTheme]);
 
-    // Force immediate visual update
-    const PaletteColor* currentColors = getCurrentColorArray();
-    PaletteColor newColor = currentColors[hueIndex];
-    fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
-    FastLED.show();
+    // Cross-fade into the new look (loopLED()).
+    requestLookTransition();
 }
 
 void switchToPreviousTheme() {
@@ -708,11 +724,8 @@ void switchToPreviousTheme() {
     saveThemeToPreferences();
     ESP_LOGI(TAG, "Switched from %s to %s theme", THEME_NAMES[oldTheme], THEME_NAMES[currentTheme]);
 
-    // Force immediate visual update
-    const PaletteColor* currentColors = getCurrentColorArray();
-    PaletteColor newColor = currentColors[hueIndex];
-    fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
-    FastLED.show();
+    // Cross-fade into the new look (loopLED()).
+    requestLookTransition();
 }
 
 // LED Control Functions
@@ -756,10 +769,10 @@ void toggleAllLEDs() {
     } else {
         // Turn on all LEDs with current hue from current theme
         ESP_LOGI(TAG, "Turning ON all LEDs");
-        const PaletteColor* currentColors = getCurrentColorArray();
-        PaletteColor color = currentColors[hueIndex];
-        fill_solid(leds, numLeds, CHSV(color.h, color.s, color.v));
-        FastLED.show();
+        // Fade up from black into the look rather than snapping on.
+        fill_solid(leds, numLeds, CRGB::Black);
+        fadeActive = false;
+        requestLookTransition();
         ESP_LOGI(TAG, "All LEDs turned ON (Theme: %s)", THEME_NAMES[currentTheme]);
     }
 }
@@ -1218,12 +1231,9 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
             saveThemeToPreferences();
             saveCustomEffectToPreferences();
 
-            // Force immediate visual update -- parity with the theme-switch
+            // Cross-fade into the effect -- parity with the theme-switch
             // paths (switchToNextTheme(), the theme-string dispatch below).
-            const PaletteColor* currentColors = getCurrentColorArray();
-            PaletteColor newColor = currentColors[hueIndex];
-            fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
-            FastLED.show();
+            requestLookTransition();
 
             ESP_LOGI(TAG, "SET_EFFECT applied: mode=%s colors=%u speed=%u intensity=%u timeoutSec=%lu",
                      EFFECT_MODE_NAMES[customEffect.mode], customEffect.colorCount,
@@ -1312,11 +1322,8 @@ void onMqttMessage(char* topic, byte* payload, unsigned int len) {
                 saveThemeToPreferences();
                 if (!ledsEnabled) ledsEnabled = true; // Use direct flag to avoid toggle logic
                 
-                // Force immediate visual update
-                const PaletteColor* currentColors = getCurrentColorArray();
-                PaletteColor newColor = currentColors[hueIndex];
-                fill_solid(leds, numLeds, CHSV(newColor.h, newColor.s, newColor.v));
-                FastLED.show();
+                // Cross-fade into the new look (loopLED()).
+                requestLookTransition();
                 publishState();
             }
             return;
@@ -1501,12 +1508,43 @@ GrayRemoteButton identifyGrayRemoteButton(uint8_t address, uint8_t command) {
 // instead of `if (currentTheme == THEME_GREEN)`.
 
 // Mirror the first half of the strip onto the second half in reverse (palindrome effect)
-void applyMirror() {
+void mirrorLeds() {
     int half = numLeds / 2;
     for (int i = 0; i < half; i++) {
         leds[numLeds - 1 - i] = leds[i];
     }
+}
+
+void applyMirror() {
+    mirrorLeds();
     showLeds();
+}
+
+// How long a look change fades for. When the wall clock is synced, the fade
+// ends on a whole second, 1.5-2.5 s from now, as GlowLamp's do: strips told
+// at once over lights/all/cmd hear it a few milliseconds apart, and ending on
+// the same second keeps them in step. Without a clock, a flat 2 s.
+static uint32_t lookFadeMs() {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    if (tv.tv_sec < (time_t)CLOCK_VALID_EPOCH) return LOOK_FADE_MS;
+    uint64_t nowE = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
+    uint64_t end = ((nowE + 1500ULL) / 1000ULL + 1ULL) * 1000ULL;
+    return (uint32_t)(end - nowE);
+}
+
+// Called wherever the look changes: theme, SET_EFFECT, revert, switching on.
+// The fade itself starts on loopLED()'s next pass, so a burst of changes in
+// one MQTT callback still starts from what was last shown.
+void requestLookTransition() {
+    fadePending = true;
+}
+
+// Current fade progress, eased, 0-255.
+static uint8_t fadeFraction(uint32_t now) {
+    uint32_t into = now - fadeStart;
+    if (into >= fadeLen) return 255;
+    return fxEaseInOut((uint8_t)((into * 255u) / fadeLen));
 }
 
 void setupLED() {
@@ -1541,6 +1579,11 @@ void setupLED() {
     // timeouts[] were seeded).
     fx.timeouts = timeouts;
     fx.sparkleVal = sparkleValues;  // issue #0015: SPARKLE's per-LED brightness array
+    fx.ledLevel = lookLevel;
+    fx.ledTarget = lookTarget;
+    fx.ledAux = lookAux;
+    // Fade in from black at boot rather than appearing at full.
+    requestLookTransition();
     fx.hueTimeout = now + 2000;
     fx.rng = arduinoRandomRange;
     logTimeout = now + logInterval;
@@ -1780,6 +1823,28 @@ void loopLED() {
         fx.lastMode = mode;
     }
 
+    // Start a requested cross-fade from what is on the strip now. If a fade
+    // is already running, what is on the strip is the blend, not leds[], so
+    // that is what the new fade starts from.
+    if (fadePending) {
+        fadePending = false;
+        uint32_t t = millis();
+        if (fadeActive) {
+            uint8_t f = fadeFraction(t);
+            for (int i = 0; i < numLeds; i++) fadeFrom[i] = fxCrossfade(fadeFrom[i], leds[i], f);
+        } else {
+            for (int i = 0; i < numLeds; i++) fadeFrom[i] = leds[i];
+        }
+        // The flicker renderers only repaint an LED when its timer fires.
+        // Firing them all now makes the new look's first frame complete,
+        // rather than fading toward leftovers of the old one.
+        for (int i = 0; i < numLeds; i++) timeouts[i] = t;
+        fadeStart = t;
+        fadeLen = lookFadeMs();
+        fadeActive = true;
+        ESP_LOGI(TAG, "Look fade over %lu ms", (unsigned long)fadeLen);
+    }
+
     fx.leds = leds;
     fx.numLeds = numLeds;
     fx.ledsPerColor = ledsPerColor;
@@ -1834,6 +1899,26 @@ void loopLED() {
             break;
         case EFFECT_STACK:
             drew = renderStack(fx, nowMs());
+            break;
+        // The living looks. millis(), like FLICKER and NEON: CANDLE and EMBER
+        // share timeouts[], which the SET_CLOCK_OFFSET harness doesn't rebase.
+        case EFFECT_CANDLE:
+            drew = renderCandle(fx, millis());
+            break;
+        case EFFECT_FLOW:
+            drew = renderFlow(fx, millis());
+            break;
+        case EFFECT_GLITTER:
+            drew = renderGlitter(fx, millis());
+            break;
+        case EFFECT_WAVES:
+            drew = renderWaves(fx, millis());
+            break;
+        case EFFECT_EMBER:
+            drew = renderEmber(fx, millis());
+            break;
+        case EFFECT_CANOPY:
+            drew = renderCanopy(fx, millis());
             break;
         case EFFECT_BLEND:
         default:
@@ -1891,11 +1976,43 @@ void loopLED() {
         swellFrame = true;
     }
 
-    if (drew || swellFrame || swellEnded || pulseEnded) {
-        if (mirrorEnabled && mode != EFFECT_FLICKER) {
-            applyMirror();
-        } else {
+    // A fade is shown every frame too, whether or not the new look drew.
+    static uint32_t fadeShowDeadline = 0;
+    bool fadeFrame = false;
+    if (fadeActive && timeReached(millis(), fadeShowDeadline)) {
+        fadeShowDeadline = millis() + 10;
+        fadeFrame = true;
+    }
+
+    if (drew || swellFrame || swellEnded || pulseEnded || fadeFrame) {
+        if (mirrorEnabled && mode != EFFECT_FLICKER) mirrorLeds();
+        uint8_t f = fadeActive ? fadeFraction(millis()) : 255;
+        if (f == 255) {
+            fadeActive = false;
             showLeds();
+        } else {
+            for (int i = 0; i < numLeds; i++) {
+                fadeHold[i] = leds[i];
+                leds[i] = fxCrossfade(fadeFrom[i], fadeHold[i], f);
+            }
+#ifdef EFFECT_TRACE
+            // What the strip actually shows mid-fade (the [TRACE] line above
+            // dumps leds[] as the renderer drew it, before blending).
+            {
+                static uint32_t fadeTraceDeadline = 0;
+                if (timeReached(millis(), fadeTraceDeadline)) {
+                    fadeTraceDeadline = millis() + 150;
+                    char px[128];
+                    int n = 0;
+                    for (int i = 0; i < numLeds && i < 10 && n < (int)sizeof(px) - 12; i++) {
+                        n += snprintf(px + n, sizeof(px) - n, "%02x%02x%02x ", leds[i].r, leds[i].g, leds[i].b);
+                    }
+                    ESP_LOGI(TAG, "[FADE] f=%u px=%s", (unsigned)f, px);
+                }
+            }
+#endif
+            showLeds();
+            for (int i = 0; i < numLeds; i++) leds[i] = fadeHold[i];
         }
     }
 }

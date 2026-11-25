@@ -279,12 +279,15 @@ void test_rollover_blend_matches_legacy(void) {
 // EFFECT_FLICKER) is caught here instead of silently running the same
 // renderer on both sides of a diff that would then still pass.
 void test_builtin_effect_mode_table(void) {
-    TEST_ASSERT_EQUAL(EFFECT_FLICKER, BUILTIN_EFFECT_MODE[THEME_GREEN]);
-    TEST_ASSERT_EQUAL(EFFECT_BLEND, BUILTIN_EFFECT_MODE[THEME_RAINBOW]);
-    TEST_ASSERT_EQUAL(EFFECT_BLEND, BUILTIN_EFFECT_MODE[THEME_PINK_PONY]);
-    TEST_ASSERT_EQUAL(EFFECT_BLEND, BUILTIN_EFFECT_MODE[THEME_OCEAN_WAVES]);
-    TEST_ASSERT_EQUAL(EFFECT_BLEND, BUILTIN_EFFECT_MODE[THEME_SUNSET]);
-    TEST_ASSERT_EQUAL(EFFECT_BLEND, BUILTIN_EFFECT_MODE[THEME_FOREST]);
+    // The built-in themes moved to the living looks (src/looks.h); BLEND and
+    // FLICKER above are still diffed against their frozen legacy copies
+    // because SET_EFFECT can select them. test/test_looks/ checks the new
+    // mapping in detail -- this just pins that no built-in still points at
+    // the legacy pair.
+    for (int t = 0; t < CYCLEABLE_THEME_COUNT; t++) {
+        TEST_ASSERT_NOT_EQUAL(EFFECT_BLEND, BUILTIN_EFFECT_MODE[t]);
+        TEST_ASSERT_NOT_EQUAL(EFFECT_FLICKER, BUILTIN_EFFECT_MODE[t]);
+    }
 }
 
 // ---------------------------------------------------------------------

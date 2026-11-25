@@ -125,47 +125,38 @@ const PaletteColor PINK_PONY_HUES[] = {
    PC(155)  // light blue
  };
 
-// Sunset Theme - Warm oranges and pinks
- const PaletteColor SUNSET_HUES[] = {
-   PC(0),   // deep red
-   PC(5),   // dark red-orange
-   PC(10),  // red-orange
-   PC(15),  // orange-red
-   PC(20),  // bright orange
-   PC(25),  // orange-yellow
-   PC(30),  // yellow-orange
-   PC(35),  // bright yellow
-   PC(40),  // warm yellow
-   PC(45),  // soft orange-yellow
-   PC(50),  // warm pink-orange
-   PC(55),  // soft pink
-   PC(60),  // light pink
-   PC(65),  // pale pink
-   PC(70),  // soft purple-pink
-   PC(75),  // deep purple
-   PC(80),  // very dark purple
-   PC(85)   // deep indigo
- };
+// Sunset Theme - dusk purple through rose and red to gold.
+// Ordered cool to hot: EMBER (src/looks.h) picks a position by heat, so the
+// dimmest embers sit at the purple end and the brightest at gold. The old
+// table ran hue 0-85 and labelled its upper half pink, purple and indigo,
+// but on FastLED's wheel 64-85 is yellow and yellow-green, so the strip went
+// green at the cool end. These are real sunset hues.
+const PaletteColor SUNSET_HUES[] = {
+  PC(192), // dusk purple
+  PC(210), // violet
+  PC(226), // magenta-pink
+  PC(242), // rose
+  PC(0),   // red
+  PC(14),  // red-orange
+  PC(28),  // orange
+  PC(42)   // gold
+};
 
-// Forest Theme - Natural greens and earth tones
- const PaletteColor FOREST_HUES[] = {
-   PC(70),  // deep forest green
-   PC(75),  // dark forest green
-   PC(80),  // medium forest green
-   PC(85),  // light forest green
-   PC(90),  // moss green
-   PC(95),  // olive green
-   PC(100), // forest blue-green
-   PC(105), // earth brown-green
-   PC(110), // dark moss green
-   PC(115), // forest olive
-   PC(120), // deep woodland green
-   PC(125), // forest twilight green
-   PC(130), // dark forest night green
-   PC(135), // verdant forest green
-   PC(140), // deep forest emerald
-   PC(145)  // rich forest jungle green
- };
+// Forest Theme - deep greens to sunlit leaf and moss.
+// The old table ran up to hue 145, which is aqua and cyan rather than green.
+// This one stays in leaf colours (68-110), and its warm end is slightly
+// desaturated so moss and olive read as earthy rather than neon. Ordered so
+// neighbours are close: CANOPY drifts through it by position.
+const PaletteColor FOREST_HUES[] = {
+  {110, 255, 200}, // deep woodland green
+  {104, 255, 200}, // forest green
+  { 98, 255, 200}, // green
+  { 92, 250, 200}, // leaf green
+  { 86, 240, 200}, // fresh leaf
+  { 80, 225, 200}, // yellow-green
+  { 74, 205, 200}, // moss
+  { 68, 190, 200}  // olive
+};
 
 #undef PC
 
